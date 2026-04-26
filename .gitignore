@@ -1,0 +1,47 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+/workers/worker
+/gateway/gateway
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+venv/
+.venv/
+
+# ML artifacts
+ml/model.pkl
+ml/model.joblib
+ml/*.pkl
+ml/*.joblib
+
+# Data
+*.csv
+!loadtests/results/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# k6 results
+loadtests/results/*.json
+loadtests/results/*.csv

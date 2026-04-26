@@ -1,0 +1,148 @@
+# ──────────────────────────────────────────────────────────────
+#  NeuroRoute — Docker Compose Topology
+#  AI-Driven Predictive Layer 7 Load Balancer
+# ──────────────────────────────────────────────────────────────
+
+networks:
+  neuronet:
+    driver: bridge
+
+volumes:
+  traffic_data:
+
+services:
+  # ── Go Reverse Proxy Gateway ──────────────────────────────
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: neuroroute-gateway
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    environment:
+      - WORKER_URLS=http://worker_1:8001,http://worker_2:8002,http://worker_3:8003
+      - HEAVY_WORKER_URL=http://worker_4:8004
+      - ML_SERVICE_URL=${ML_SERVICE_URL:-http://ml_service:8050}
+      - ML_PREDICT_TIMEOUT_MS=${ML_PREDICT_TIMEOUT_MS:-5}
+      - SMART_ROUTING=${SMART_ROUTING:-false}
+      - TRAFFIC_LOG_PATH=${TRAFFIC_LOG_PATH:-/data/traffic.csv}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - traffic_data:/data
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    depends_on:
+      worker_1:
+        condition: service_started
+      worker_2:
+        condition: service_started
+      worker_3:
+        condition: service_started
+      worker_4:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── Fast Lane Workers (Light Requests) ────────────────────
+  worker_1:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: neuroroute-worker-1
+    ports:
+      - "${WORKER_1_PORT:-8001}:8080"
+    environment:
+      - WORKER_ID=1
+      - PORT=8080
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    restart: unless-stopped
+
+  worker_2:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: neuroroute-worker-2
+    ports:
+      - "${WORKER_2_PORT:-8002}:8080"
+    environment:
+      - WORKER_ID=2
+      - PORT=8080
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    restart: unless-stopped
+
+  worker_3:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: neuroroute-worker-3
+    ports:
+      - "${WORKER_3_PORT:-8003}:8080"
+    environment:
+      - WORKER_ID=3
+      - PORT=8080
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    restart: unless-stopped
+
+  # ── Slow Lane Worker (Heavy Requests) ─────────────────────
+  worker_4:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: neuroroute-worker-4
+    ports:
+      - "${WORKER_4_PORT:-8004}:8080"
+    environment:
+      - WORKER_ID=4
+      - PORT=8080
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    restart: unless-stopped
+
+  # ── Python ML Prediction Service ──────────────────────────
+  ml_service:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    container_name: neuroroute-ml
+    ports:
+      - "${ML_SERVICE_PORT:-8050}:8050"
+    environment:
+      - MODEL_PATH=/app/model.pkl
+      - PORT=8050
+    volumes:
+      - traffic_data:/data:ro
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    restart: unless-stopped
