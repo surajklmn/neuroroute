@@ -20,8 +20,8 @@ services:
     ports:
       - "${GATEWAY_PORT:-8000}:8000"
     environment:
-      - WORKER_URLS=http://worker_1:8001,http://worker_2:8002,http://worker_3:8003
-      - HEAVY_WORKER_URL=http://worker_4:8004
+      - WORKER_URLS=http://worker_1:8080,http://worker_2:8080,http://worker_3:8080
+      - HEAVY_WORKER_URL=http://worker_4:8080
       - ML_SERVICE_URL=${ML_SERVICE_URL:-http://ml_service:8050}
       - ML_PREDICT_TIMEOUT_MS=${ML_PREDICT_TIMEOUT_MS:-5}
       - SMART_ROUTING=${SMART_ROUTING:-false}

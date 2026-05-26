@@ -10,9 +10,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code and model
 COPY train.py .
 COPY server.py .
+COPY model.pkl* ./
 
 # Pre-create data directory
 RUN mkdir -p /app/data

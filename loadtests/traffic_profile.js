@@ -172,6 +172,18 @@ export default function () {
 // ── Summary Handler ─────────────────────────────────────────
 
 export function handleSummary(data) {
+  const fmt = (v) => (v !== undefined && v !== null ? v.toFixed(2) : "N/A");
+
+  const duration = data.metrics.http_req_duration
+    ? data.metrics.http_req_duration.values
+    : {};
+  const light = data.metrics.light_latency
+    ? data.metrics.light_latency.values
+    : {};
+  const heavy = data.metrics.heavy_latency
+    ? data.metrics.heavy_latency.values
+    : {};
+
   const summary = {
     timestamp: new Date().toISOString(),
     total_requests: data.metrics.http_reqs
@@ -180,29 +192,26 @@ export function handleSummary(data) {
     error_rate: data.metrics.errors
       ? data.metrics.errors.values.rate
       : 0,
-    http_req_duration: data.metrics.http_req_duration
-      ? {
-          avg: data.metrics.http_req_duration.values.avg,
-          p90: data.metrics.http_req_duration.values["p(90)"],
-          p95: data.metrics.http_req_duration.values["p(95)"],
-          p99: data.metrics.http_req_duration.values["p(99)"],
-          max: data.metrics.http_req_duration.values.max,
-        }
-      : {},
-    light_latency: data.metrics.light_latency
-      ? {
-          avg: data.metrics.light_latency.values.avg,
-          p95: data.metrics.light_latency.values["p(95)"],
-          p99: data.metrics.light_latency.values["p(99)"],
-        }
-      : {},
-    heavy_latency: data.metrics.heavy_latency
-      ? {
-          avg: data.metrics.heavy_latency.values.avg,
-          p95: data.metrics.heavy_latency.values["p(95)"],
-          p99: data.metrics.heavy_latency.values["p(99)"],
-        }
-      : {},
+    http_req_duration: {
+      avg: duration.avg,
+      med: duration.med,
+      p90: duration["p(90)"],
+      p95: duration["p(95)"],
+      p99: duration["p(99)"],
+      max: duration.max,
+    },
+    light_latency: {
+      avg: light.avg,
+      med: light.med,
+      max: light.max,
+      count: light.count,
+    },
+    heavy_latency: {
+      avg: heavy.avg,
+      med: heavy.med,
+      max: heavy.max,
+      count: heavy.count,
+    },
   };
 
   console.log("\n══════════════════════════════════════════════");
@@ -210,13 +219,16 @@ export function handleSummary(data) {
   console.log("══════════════════════════════════════════════");
   console.log(`  Total Requests:  ${summary.total_requests}`);
   console.log(`  Error Rate:      ${(summary.error_rate * 100).toFixed(2)}%`);
-  console.log(`  Avg Latency:     ${summary.http_req_duration.avg?.toFixed(2)}ms`);
-  console.log(`  p95 Latency:     ${summary.http_req_duration.p95?.toFixed(2)}ms`);
-  console.log(`  p99 Latency:     ${summary.http_req_duration.p99?.toFixed(2)}ms`);
-  console.log(`  Max Latency:     ${summary.http_req_duration.max?.toFixed(2)}ms`);
   console.log("──────────────────────────────────────────────");
-  console.log(`  Light p99:       ${summary.light_latency.p99?.toFixed(2)}ms`);
-  console.log(`  Heavy p99:       ${summary.heavy_latency.p99?.toFixed(2)}ms`);
+  console.log(`  Avg Latency:     ${fmt(duration.avg)}ms`);
+  console.log(`  Median:          ${fmt(duration.med)}ms`);
+  console.log(`  p90 Latency:     ${fmt(duration["p(90)"])}ms`);
+  console.log(`  p95 Latency:     ${fmt(duration["p(95)"])}ms`);
+  console.log(`  p99 Latency:     ${fmt(duration["p(99)"])}ms`);
+  console.log(`  Max Latency:     ${fmt(duration.max)}ms`);
+  console.log("──────────────────────────────────────────────");
+  console.log(`  Light — avg: ${fmt(light.avg)}ms | max: ${fmt(light.max)}ms | count: ${light.count || 0}`);
+  console.log(`  Heavy — avg: ${fmt(heavy.avg)}ms | max: ${fmt(heavy.max)}ms | count: ${heavy.count || 0}`);
   console.log("══════════════════════════════════════════════\n");
 
   return {

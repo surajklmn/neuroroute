@@ -442,11 +442,13 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ── Proxy the request ──
 	target.Proxy.ServeHTTP(crw, r)
 
-	// ── Check if proxy succeeded → mark health accordingly ──
+	// ── Check if proxy succeeded ──
+	// Note: We rely entirely on the active background health checker (which pings `/ping`)
+	// to mark backends DOWN. Marking them down here during active heavy load because of client timeouts
+	// causes cascading failures that spill heavy traffic into the fast lane.
 	if crw.statusCode >= 502 {
-		target.MarkDown()
-	} else {
-		target.MarkUp()
+		// Log proxy issues for debug but keep worker in pool unless health checker flags it
+		log.Printf("⚠️  Proxy returned status %d for backend %s", crw.statusCode, target.URL.Host)
 	}
 
 	// ── Log traffic asynchronously ──

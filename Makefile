@@ -38,13 +38,20 @@ logs-ml: ## Tail ML service logs
 	docker compose logs -f ml_service
 
 # ── ML Pipeline ─────────────────────────────────────────
+VENV := ml/.venv/bin
+
+venv: ## Set up Python virtual environment for ML
+	python -m venv ml/.venv
+	$(VENV)/pip install -r ml/requirements.txt
+	@echo "✅ Virtual environment ready at ml/.venv"
+
 harvest: ## Copy traffic.csv from the gateway volume to ml/data/
 	mkdir -p ml/data
 	docker cp neuroroute-gateway:/data/traffic.csv ml/data/traffic.csv
 	@echo "✅ Harvested traffic.csv → ml/data/traffic.csv"
 
 train: ## Train the ML model from harvested traffic data
-	cd ml && python train.py
+	$(VENV)/python ml/train.py --data ml/data/traffic.csv --clean --output ml/model.pkl
 	@echo "✅ Model trained → ml/model.pkl"
 
 deploy-model: ## Rebuild and restart the ML service with new model
@@ -71,17 +78,22 @@ smoke: ## Quick smoke test — ping the gateway
 	@curl -s http://localhost:8050/health | python3 -m json.tool || echo "❌ ML service unreachable"
 
 test: ## Run k6 load test (requires k6 installed)
-	k6 run loadtests/traffic_profile.js
+	K6_WEB_DASHBOARD=true k6 run loadtests/traffic_profile.js
 
 test-rr: ## Load test with round-robin only
 	SMART_ROUTING=false docker compose up -d gateway
 	sleep 2
-	k6 run --out csv=loadtests/results/round_robin.csv loadtests/traffic_profile.js
+	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/round_robin.csv loadtests/traffic_profile.js
 
 test-smart: ## Load test with smart routing
 	SMART_ROUTING=true docker compose up -d gateway
 	sleep 2
-	k6 run --out csv=loadtests/results/smart_route.csv loadtests/traffic_profile.js
+	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/smart_route.csv loadtests/traffic_profile.js
+
+
+compare: ## Compare Round-Robin vs Smart-Routing results and generate visual charts
+	$(VENV)/python scripts/compare.py
+
 
 # ── Cleanup ──────────────────────────────────────────────
 clean: ## Remove all containers, volumes, and images

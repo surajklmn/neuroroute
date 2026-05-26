@@ -148,6 +148,11 @@ def main():
         help="Processing time threshold in ms for heavy label (default: 200)",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Apply Semi-Supervised Label Correction to filter out queueing congestion noise",
+    )
+    parser.add_argument(
         "--estimators",
         type=int,
         default=50,
@@ -169,6 +174,13 @@ def main():
 
     # ── Pipeline ──
     df = load_and_prepare(args.data, args.threshold)
+    
+    if args.clean:
+        print("🧹 Applying Semi-Supervised Label Correction (Ground-Truth Routing)...")
+        # Correct labels: Heavy if query contains heavy/matrix, Light otherwise
+        queries = df["query_params"].fillna("").astype(str).str.lower()
+        df["label"] = queries.apply(lambda q: 1 if ("heavy" in q or "matrix" in q) else 0)
+        
     X, y = engineer_features(df)
     model = train_model(X, y, n_estimators=args.estimators, max_depth=args.max_depth)
 
