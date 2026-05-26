@@ -90,6 +90,13 @@ func NewBackend(rawURL string) (*Backend, error) {
 
 	proxy := httputil.NewSingleHostReverseProxy(u)
 
+	// Rewrite Host header for reverse proxying to support live/external web services
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = u.Host
+	}
+
 	// Customize the proxy's error handler to not panic
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("⚠️  Proxy error for %s: %v", u.Host, err)
