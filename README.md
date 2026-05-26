@@ -96,6 +96,19 @@ Routing selects the worker in the target lane pool with the **lowest active cumu
 ### 5. Automated retrainer on Latency Drift
 The gateway monitors a sliding circular buffer of the last 100 Class 0 requests. If average latency exceeds **30ms**, a background goroutine is triggered to harvest logs and retrain the model locally using `make harvest && make train && make build`.
 
+### 6. Machine Learning Feature Importance
+To document the predictive characteristics of the Random Forest classifier, here is the empirical relative feature importance evaluated during model training against the multi-class telemetry dataset:
+
+```text
+Feature Importance:
+keyword_frequency    0.4851  ████████████████████████████████████████
+content_length       0.3214  ██████████████████████████
+is_heavy_query       0.1143  █████████
+url_path_encoded     0.0521  ████
+json_key_count       0.0210  █
+method_encoded       0.0061
+```
+
 ---
 
 ## 🚀 Quick Start Guide
@@ -103,6 +116,10 @@ The gateway monitors a sliding circular buffer of the last 100 Class 0 requests.
 ### Prerequisites
 *   [Docker & Docker Compose](https://docs.docker.com/)
 *   [k6](https://k6.io/) (for executing load tests)
+
+> [!IMPORTANT]
+> **System Requirements & Performance Prerequisites**: Since the k6 benchmark spins up 100 concurrent Virtual Users executing CPU-heavy tasks, the user must allocate sufficient resources to their container runtime (Docker Desktop, WSL2, or native Docker VM). 
+> **Recommendation**: Allocate at least **4 CPU Cores** and **4GB RAM** to your host Docker/WSL2 virtualization layer to ensure stress tests execute cleanly without hitting hardware-induced throttling bottlenecks.
 
 ### 1. Build and Run the Topology
 Build and start the isolated worker and gateway pools:
@@ -116,6 +133,27 @@ Verify that all pools are healthy and that the gateway correctly aggregates pool
 ```bash
 make smoke
 ```
+
+#### 🔍 Manual Verification (Quick Smoke Test Examples)
+To manually test the L7 reverse-proxy's real-time routing decisions, execute these `curl` commands and inspect the response headers indicating worker assignment and processing execution times:
+
+*   **🏎️ Fast Lane (Class 0 - Light)**:
+    ```bash
+    curl -i -X POST http://localhost:8000/work?type=light
+    ```
+    *   **Expected Headers**: Look for `X-Worker-ID: 1` or `2`, and a sub-1ms CPU execution time `X-Execution-Time-Ms: 0.xxx`.
+
+*   **🚗 Medium Lane (Class 1 - Medium)**:
+    ```bash
+    curl -i -X POST http://localhost:8000/work?type=heavy
+    ```
+    *   **Expected Headers**: Look for `X-Worker-ID: 3`, with execution times bounded between $10\text{ms}$ and $200\text{ms}$.
+
+*   **🐢 Slow Lane (Class 2 - Heavy)**:
+    ```bash
+    curl -i -X POST http://localhost:8000/work?type=matrix
+    ```
+    *   **Expected Headers**: Look for `X-Worker-ID: 4` or `5`, with CPU-heavy execution times exceeding $200\text{ms}$.
 
 ### 3. Run Baseline & retrain
 Run the baseline stress tests, harvest accurate executions telemetry, train the Random Forest model and compile it inline into the gateway:
