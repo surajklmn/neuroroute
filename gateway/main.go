@@ -1223,6 +1223,37 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
             </div>
         </div>
 
+        <!-- Live SLA & HOL Analyzer Card -->
+        <div class="card" id="sla-card" style="border-color: var(--neon-blue); box-shadow: 0 0 20px rgba(14, 165, 233, 0.05);">
+            <h2>Live Performance & SLA Analyzer</h2>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-bottom: 1.2rem;">
+                <!-- Metric 1: Avg Light Latency -->
+                <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 1rem; text-align: center;">
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Avg Light Latency</div>
+                    <div style="font-size: 2rem; font-weight: 800; color: var(--neon-green); margin: 0.5rem 0;" id="avg-light-latency">0.0ms</div>
+                    <div style="font-size: 0.75rem; color: var(--text-secondary);" id="light-latency-status">Healthy (&lt; 15ms)</div>
+                </div>
+
+                <!-- Metric 2: Avg Heavy Latency -->
+                <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 1rem; text-align: center;">
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">Avg Heavy Latency</div>
+                    <div style="font-size: 2rem; font-weight: 800; color: var(--neon-amber); margin: 0.5rem 0;" id="avg-heavy-latency">0.0ms</div>
+                    <div style="font-size: 0.75rem; color: var(--text-secondary);">CPU-Bound Processing</div>
+                </div>
+
+                <!-- Metric 3: HOL Blocking Index -->
+                <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 1rem; text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center; border: 1px solid rgba(255,255,255,0.05);" id="hol-box">
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">HOL Blocking Index</div>
+                    <div style="font-size: 1.6rem; font-weight: 800; color: var(--neon-green); margin: 0.5rem 0;" id="hol-value">0%</div>
+                    <div style="font-size: 0.75rem; color: var(--text-secondary);" id="hol-desc">Lanes are fully isolated</div>
+                </div>
+            </div>
+            <!-- Live Analysis Explainer Text -->
+            <div style="background: rgba(0, 0, 0, 0.2); border-left: 4px solid var(--neon-blue); padding: 1rem; border-radius: 4px; font-size: 0.92rem; line-height: 1.6;" id="analysis-explainer">
+                Analyzing traffic pattern. Trigger some requests or start the simulator to begin evaluation...
+            </div>
+        </div>
+
         <!-- Classification Log Stream -->
         <div class="card">
             <h2>Real-Time Classification Log Stream</h2>
@@ -1359,6 +1390,82 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
                     if (b.in_flight_weight > 0 && percentage < 5) percentage = 5;
                     document.getElementById('progress-' + suffix).style.width = percentage + '%';
                 });
+
+                // Calculate SLA metrics from recent requests
+                if (data.recent_requests && data.recent_requests.length > 0) {
+                    var lightRequests = data.recent_requests.filter(function(r) { return r.actual_route === 0 || r.predicted === 0; });
+                    var heavyRequests = data.recent_requests.filter(function(r) { return r.actual_route === 2 || r.predicted === 2; });
+
+                    var avgLight = 0;
+                    if (lightRequests.length > 0) {
+                        var sumLight = 0;
+                        lightRequests.forEach(function(r) { sumLight += r.processing_ms; });
+                        avgLight = sumLight / lightRequests.length;
+                    }
+
+                    var avgHeavy = 0;
+                    if (heavyRequests.length > 0) {
+                        var sumHeavy = 0;
+                        heavyRequests.forEach(function(r) { sumHeavy += r.processing_ms; });
+                        avgHeavy = sumHeavy / heavyRequests.length;
+                    }
+
+                    // Calculate HOL Blocking Index (% of light requests taking > 50ms)
+                    var holCount = 0;
+                    lightRequests.forEach(function(r) {
+                        if (r.processing_ms > 50) holCount++;
+                    });
+                    var holIndex = lightRequests.length > 0 ? Math.round((holCount / lightRequests.length) * 100) : 0;
+
+                    // Update UI elements
+                    document.getElementById('avg-light-latency').textContent = avgLight.toFixed(1) + 'ms';
+                    document.getElementById('avg-heavy-latency').textContent = avgHeavy.toFixed(1) + 'ms';
+                    
+                    var lightStatus = document.getElementById('light-latency-status');
+                    var lightVal = document.getElementById('avg-light-latency');
+                    if (avgLight < 15) {
+                        lightVal.style.color = 'var(--neon-green)';
+                        lightStatus.textContent = 'Healthy (< 15ms)';
+                    } else if (avgLight >= 15 && avgLight < 50) {
+                        lightVal.style.color = 'var(--neon-amber)';
+                        lightStatus.textContent = 'Warning (Mild Delay)';
+                    } else {
+                        lightVal.style.color = 'var(--neon-red)';
+                        lightStatus.textContent = 'Critical (HOL Queue Blocked)';
+                    }
+
+                    var holValue = document.getElementById('hol-value');
+                    var holDesc = document.getElementById('hol-desc');
+                    var holBox = document.getElementById('hol-box');
+                    var explainer = document.getElementById('analysis-explainer');
+
+                    holValue.textContent = holIndex + '%';
+                    if (holIndex === 0) {
+                        holValue.style.color = 'var(--neon-green)';
+                        holDesc.textContent = 'Lanes are fully isolated';
+                        holBox.style.borderColor = 'rgba(16, 185, 129, 0.2)';
+                        
+                        if (data.smart_routing) {
+                            explainer.innerHTML = '🟢 <strong>Smart Lane Isolation Active:</strong> Heavy computations are isolated in the Slow Lane. Light tasks are executing instantly in the Fast Lane without any queuing delays. Your SLA is 100% guaranteed!';
+                            explainer.style.borderLeftColor = 'var(--neon-green)';
+                        } else {
+                            explainer.innerHTML = '🟡 <strong>Baseline Active (Idle):</strong> Currently no active HOL blocking because traffic is low. Trigger a heavy task or start simulation to see queue degradation.';
+                            explainer.style.borderLeftColor = 'var(--neon-amber)';
+                        }
+                    } else if (holIndex > 0 && holIndex <= 35) {
+                        holValue.style.color = 'var(--neon-amber)';
+                        holDesc.textContent = 'Mild Head-of-Line Blocking';
+                        holBox.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                        explainer.innerHTML = '⚠️ <strong>Warning: Mild Head-of-Line Blocking Detected!</strong> Some light requests are starting to experience latency delays because they are queued behind heavier computations.';
+                        explainer.style.borderLeftColor = 'var(--neon-amber)';
+                    } else {
+                        holValue.style.color = 'var(--neon-red)';
+                        holDesc.textContent = 'CRITICAL HOL BLOCKING!';
+                        holBox.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+                        explainer.innerHTML = '🚨 <strong>Critical Head-of-Line Blocking!</strong> Shared queues have collapsed. Over ' + holIndex + '% of fast light requests are severely delayed by heavy matrix computations. This is the exact failure model that NeuroRoute solves!';
+                        explainer.style.borderLeftColor = 'var(--neon-red)';
+                    }
+                }
 
                 // Update logs body
                 var logsBody = document.getElementById('logs-body');
