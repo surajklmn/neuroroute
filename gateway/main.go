@@ -23,6 +23,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -376,13 +377,36 @@ func (dm *DriftMonitor) triggerRetraining() {
 
 // ── Router ──────────────────────────────────────────────────
 
+type RecentRequest struct {
+	Timestamp    string  `json:"timestamp"`
+	Path         string  `json:"path"`
+	Method       string  `json:"method"`
+	PayloadSize  int64   `json:"payload_size"`
+	Predicted    int     `json:"predicted"`
+	ActualRoute  int     `json:"actual_route"`
+	ProcessingMs float64 `json:"processing_ms"`
+	WorkerID     string  `json:"worker_id"`
+	Status       int     `json:"status"`
+}
+
 type Router struct {
-	fastLane     []*Backend // Class 0
-	mediumLane   []*Backend // Class 1
-	slowLane     []*Backend // Class 2
-	logger       *TrafficLogger
-	driftMonitor *DriftMonitor
-	smartMode    bool
+	fastLane      []*Backend // Class 0
+	mediumLane    []*Backend // Class 1
+	slowLane      []*Backend // Class 2
+	logger        *TrafficLogger
+	driftMonitor  *DriftMonitor
+	smartMode     bool
+	historyMu     sync.RWMutex
+	recentHistory []RecentRequest
+}
+
+func (rt *Router) AddRequestToHistory(req RecentRequest) {
+	rt.historyMu.Lock()
+	defer rt.historyMu.Unlock()
+	rt.recentHistory = append([]RecentRequest{req}, rt.recentHistory...)
+	if len(rt.recentHistory) > 20 {
+		rt.recentHistory = rt.recentHistory[:20]
+	}
 }
 
 func NewRouter(cfg Config) (*Router, error) {
@@ -419,12 +443,13 @@ func NewRouter(cfg Config) (*Router, error) {
 	}
 
 	return &Router{
-		fastLane:     fastLane,
-		mediumLane:   mediumLane,
-		slowLane:     slowLane,
-		logger:       logger,
-		driftMonitor: NewDriftMonitor(),
-		smartMode:    cfg.SmartRouting,
+		fastLane:      fastLane,
+		mediumLane:    mediumLane,
+		slowLane:      slowLane,
+		logger:        logger,
+		driftMonitor:  NewDriftMonitor(),
+		smartMode:     cfg.SmartRouting,
+		recentHistory: make([]RecentRequest, 0, 20),
 	}, nil
 }
 
@@ -512,6 +537,16 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/status" {
 		rt.handleStatus(w, r)
+		return
+	}
+
+	if r.URL.Path == "/dashboard" {
+		rt.handleDashboard(w, r)
+		return
+	}
+
+	if r.URL.Path == "/dashboard/trigger" {
+		rt.handleDashboardTrigger(w, r)
 		return
 	}
 
@@ -628,6 +663,19 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		KeywordFrequency: keywordFrequency,
 	})
 
+	// Add to in-memory history log for dashboard visualization
+	rt.AddRequestToHistory(RecentRequest{
+		Timestamp:    time.Now().Format("15:04:05.000"),
+		Path:         r.URL.Path,
+		Method:       r.Method,
+		PayloadSize:  r.ContentLength,
+		Predicted:    predictedClass,
+		ActualRoute:  actualClass,
+		ProcessingMs: processingMs,
+		WorkerID:     workerID,
+		Status:       crw.statusCode,
+	})
+
 	// ── Drift Detection (Class 0 requests only) ──
 	if actualClass == 0 {
 		rt.driftMonitor.Add(processingMs)
@@ -671,10 +719,634 @@ func (rt *Router) handleStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	rt.historyMu.RLock()
+	recent := make([]RecentRequest, len(rt.recentHistory))
+	copy(recent, rt.recentHistory)
+	rt.historyMu.RUnlock()
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"smart_routing": rt.smartMode,
-		"backends":      statuses,
+		"smart_routing":   rt.smartMode,
+		"backends":        statuses,
+		"recent_requests": recent,
 	})
+}
+
+// handleDashboardTrigger executes a local loopback work request through the router
+func (rt *Router) handleDashboardTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	workType := r.URL.Query().Get("type")
+	if workType == "" {
+		workType = "light"
+	}
+
+	var payload []byte
+	if workType == "light" {
+		payload = []byte(`{"data":"dashboard-trigger-sha256-light-payload"}`)
+	} else {
+		payload = []byte(`{"data":"dashboard-trigger-heavy-payload"}`)
+	}
+
+	// Dynamic loopback call
+	mockReq, err := http.NewRequest(http.MethodPost, "/work?type="+workType, bytes.NewBuffer(payload))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	mockReq.Header.Set("Content-Type", "application/json")
+	mockReq.ContentLength = int64(len(payload))
+
+	rec := httptest.NewRecorder()
+	rt.ServeHTTP(rec, mockReq)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(rec.Code)
+	w.Write(rec.Body.Bytes())
+}
+
+// handleDashboard serves the HTML dashboard page
+func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	htmlContent := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuroRoute — AI-Routing Live Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #0b0f19;
+            --bg-surface: #131929;
+            --border-glow: rgba(56, 189, 248, 0.15);
+            --border-hover: rgba(56, 189, 248, 0.4);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --neon-green: #10b981;
+            --neon-amber: #f59e0b;
+            --neon-red: #ef4444;
+            --neon-blue: #0ea5e9;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+            min-height: 100vh;
+            padding: 2rem;
+            line-height: 1.5;
+            background-image: radial-gradient(circle at 50% 0%, rgba(14, 165, 233, 0.12) 0%, transparent 60%);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 1.5rem;
+        }
+
+        .logo-section h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.03em;
+        }
+
+        .logo-section p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-top: 0.25rem;
+        }
+
+        .badge {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            color: var(--neon-green);
+            padding: 0.4rem 1rem;
+            border-radius: 9999px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.1);
+        }
+
+        .badge.pulse::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background-color: var(--neon-green);
+            border-radius: 50%;
+            display: inline-block;
+            animation: pulse-glow 1.5s infinite;
+        }
+
+        @keyframes pulse-glow {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        /* Dashboard Grid */
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-glow);
+            border-radius: 16px;
+            padding: 1.8rem;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: var(--border-hover);
+            box-shadow: 0 10px 35px rgba(56, 189, 248, 0.05);
+        }
+
+        .card h2 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            border-left: 4px solid var(--neon-blue);
+            padding-left: 0.75rem;
+        }
+
+        /* Lane Status Bars */
+        .lane-card {
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .lane-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1rem 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .lane-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .lane-title {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .lane-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .lane-indicator.healthy { background-color: var(--neon-green); box-shadow: 0 0 10px var(--neon-green); }
+        .lane-indicator.down { background-color: var(--neon-red); box-shadow: 0 0 10px var(--neon-red); }
+
+        .lane-meta {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .weight-progress-container {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 9999px;
+            overflow: hidden;
+            margin-top: 0.25rem;
+        }
+
+        .weight-progress {
+            height: 100%;
+            width: 0%;
+            border-radius: 9999px;
+            transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .lane-item.fast .weight-progress { background-color: var(--neon-green); }
+        .lane-item.medium .weight-progress { background-color: var(--neon-amber); }
+        .lane-item.slow .weight-progress { background-color: var(--neon-red); }
+
+        /* Playground Actions */
+        .playground-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            color: var(--text-primary);
+            padding: 1.2rem 1rem;
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.05);
+            transform: translateY(-2px);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn.light:hover { border-color: var(--neon-green); box-shadow: 0 0 15px rgba(16, 185, 129, 0.15); }
+        .btn.medium:hover { border-color: var(--neon-amber); box-shadow: 0 0 15px rgba(245, 158, 11, 0.15); }
+        .btn.heavy:hover { border-color: var(--neon-red); box-shadow: 0 0 15px rgba(239, 68, 68, 0.15); }
+
+        .btn svg {
+            width: 24px;
+            height: 24px;
+            transition: transform 0.3s ease;
+        }
+
+        .btn:hover svg {
+            transform: scale(1.15);
+        }
+
+        .btn.light svg { stroke: var(--neon-green); }
+        .btn.medium svg { stroke: var(--neon-amber); }
+        .btn.heavy svg { stroke: var(--neon-red); }
+
+        .console-output {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 1rem 1.25rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            min-height: 120px;
+            max-height: 120px;
+            overflow-y: auto;
+            color: #38bdf8;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        /* Classification Stream Table */
+        .table-container {
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            color: var(--text-secondary);
+            font-weight: 600;
+            padding: 0.75rem 1rem;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.08);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 0.85rem 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            font-family: 'Outfit', sans-serif;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+
+        .badge-class {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-class.light { background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); color: var(--neon-green); }
+        .badge-class.medium { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.2); color: var(--neon-amber); }
+        .badge-class.heavy { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: var(--neon-red); }
+
+        .spinner {
+            animation: rotate 2s linear infinite;
+            width: 14px;
+            height: 14px;
+            margin-right: 0.5rem;
+            display: inline-block;
+        }
+
+        @keyframes rotate {
+            100% { transform: rotate(360deg); }
+        }
+
+        .spinner circle {
+            stroke: currentColor;
+            stroke-linecap: round;
+            animation: dash 1.5s ease-in-out infinite;
+        }
+
+        @keyframes dash {
+            0% { stroke-dasharray: 1, 150; stroke-dashoffset: 0; }
+            50% { stroke-dasharray: 90, 150; stroke-dashoffset: -35; }
+            100% { stroke-dasharray: 90, 150; stroke-dashoffset: -124; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="logo-section">
+                <h1>NEUROROUTE</h1>
+                <p>AI-Driven Predictive Layer 7 Gateway</p>
+            </div>
+            <div class="badge pulse" id="routing-mode">SMART ROUTING ACTIVE</div>
+        </header>
+
+        <div class="grid">
+            <!-- Left Side: Lane Status -->
+            <div class="card">
+                <h2>L7 Concurrency Lane Status</h2>
+                <div class="lane-card" id="lanes-container">
+                    <!-- Fast Lane -->
+                    <div class="lane-item fast">
+                        <div class="lane-header">
+                            <div class="lane-title">
+                                <div class="lane-indicator healthy" id="indicator-fast"></div>
+                                <span>Fast Lane (Class 0)</span>
+                            </div>
+                            <div class="lane-meta" id="weight-fast">Weight: 0</div>
+                        </div>
+                        <div class="weight-progress-container">
+                            <div class="weight-progress" id="progress-fast" style="width: 0%;"></div>
+                        </div>
+                        <div class="lane-meta" id="url-fast">Url: loading...</div>
+                    </div>
+
+                    <!-- Medium Lane -->
+                    <div class="lane-item medium">
+                        <div class="lane-header">
+                            <div class="lane-title">
+                                <div class="lane-indicator healthy" id="indicator-medium"></div>
+                                <span>Medium Lane (Class 1)</span>
+                            </div>
+                            <div class="lane-meta" id="weight-medium">Weight: 0</div>
+                        </div>
+                        <div class="weight-progress-container">
+                            <div class="weight-progress" id="progress-medium" style="width: 0%;"></div>
+                        </div>
+                        <div class="lane-meta" id="url-medium">Url: loading...</div>
+                    </div>
+
+                    <!-- Slow Lane -->
+                    <div class="lane-item slow">
+                        <div class="lane-header">
+                            <div class="lane-title">
+                                <div class="lane-indicator healthy" id="indicator-slow"></div>
+                                <span>Slow Lane (Class 2)</span>
+                            </div>
+                            <div class="lane-meta" id="weight-slow">Weight: 0</div>
+                        </div>
+                        <div class="weight-progress-container">
+                            <div class="weight-progress" id="progress-slow" style="width: 0%;"></div>
+                        </div>
+                        <div class="lane-meta" id="url-slow">Url: loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Side: Interactive Playground -->
+            <div class="card">
+                <h2>Interactive Traffic Playground</h2>
+                <div class="playground-grid">
+                    <button class="btn light" onclick="triggerLoad('light')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M13 2L3 14h9l-1 8 10-16h-9l1-8z"/>
+                        </svg>
+                        <span>Trigger Light</span>
+                    </button>
+                    <button class="btn medium" onclick="triggerLoad('medium')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M12 6v6l4 2"/>
+                        </svg>
+                        <span>Trigger Medium</span>
+                    </button>
+                    <button class="btn heavy" onclick="triggerLoad('heavy')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+                            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+                            <line x1="6" y1="6" x2="6.01" y2="6"/>
+                            <line x1="6" y1="18" x2="6.01" y2="18"/>
+                        </svg>
+                        <span>Trigger Heavy</span>
+                    </button>
+                </div>
+                <div class="console-output" id="console">
+                    <div>[SYSTEM] Ready for operations. Click a button to test load-balancing routing...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Classification Log Stream -->
+        <div class="card">
+            <h2>Real-Time Classification Log Stream</h2>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Method & Path</th>
+                            <th>Worker Node</th>
+                            <th>Prediction</th>
+                            <th>Actual Route</th>
+                            <th>Latency</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logs-body">
+                        <tr>
+                            <td colspan="7" style="text-align: center; color: var(--text-secondary);">No incoming requests logged yet. Trigger some traffic above!</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var API_BASE = window.location.origin;
+
+        function logToConsole(text, isError) {
+            var consoleBox = document.getElementById('console');
+            var entry = document.createElement('div');
+            entry.style.color = isError ? 'var(--neon-red)' : '#38bdf8';
+            entry.textContent = '[' + new Date().toLocaleTimeString() + '] ' + text;
+            consoleBox.appendChild(entry);
+            consoleBox.scrollTop = consoleBox.scrollHeight;
+        }
+
+        async function triggerLoad(type) {
+            logToConsole('Dispatching loopback POST /work?type=' + type + ' to L7 gateway...');
+            try {
+                var res = await fetch(API_BASE + '/dashboard/trigger?type=' + type, { method: 'POST' });
+                var data = await res.json();
+                if (res.ok) {
+                    var elapsed = data.elapsed_ms || 'N/A';
+                    logToConsole('✅ Success! Routed to ' + data.worker_id + ' in ' + elapsed + 'ms.');
+                    updateStatus();
+                } else {
+                    logToConsole('❌ Server error: ' + (data.error || 'unknown failure'), true);
+                }
+            } catch (err) {
+                logToConsole('❌ Network error while dispatching job: ' + err.message, true);
+            }
+        }
+
+        async function updateStatus() {
+            try {
+                var res = await fetch(API_BASE + '/status');
+                if (!res.ok) return;
+                var data = await res.json();
+
+                // Update Routing Mode Badge
+                var modeBadge = document.getElementById('routing-mode');
+                if (data.smart_routing) {
+                    modeBadge.textContent = 'SMART ROUTING ACTIVE';
+                    modeBadge.className = 'badge pulse';
+                    modeBadge.style.color = 'var(--neon-green)';
+                    modeBadge.style.background = 'rgba(16, 185, 129, 0.1)';
+                    modeBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
+                } else {
+                    modeBadge.textContent = 'SMART ROUTING BYPASSED (DUMB)';
+                    modeBadge.className = 'badge';
+                    modeBadge.style.color = 'var(--neon-amber)';
+                    modeBadge.style.background = 'rgba(245, 158, 11, 0.1)';
+                    modeBadge.style.borderColor = 'rgba(245, 158, 11, 0.25)';
+                }
+
+                // Update Lanes status
+                var maxWeight = 100;
+                data.backends.forEach(function(b) {
+                    var suffix = 'fast';
+                    if (b.lane === 'medium') suffix = 'medium';
+                    if (b.lane === 'slow') suffix = 'slow';
+
+                    var indicator = document.getElementById('indicator-' + suffix);
+                    if (b.healthy) {
+                        indicator.className = 'lane-indicator healthy';
+                    } else {
+                        indicator.className = 'lane-indicator down';
+                    }
+
+                    document.getElementById('weight-' + suffix).textContent = 'In-Flight Weight: ' + b.in_flight_weight;
+                    document.getElementById('url-' + suffix).textContent = 'Backend: ' + b.url;
+
+                    // Update progress bar width
+                    var percentage = Math.min(100, (b.in_flight_weight / maxWeight) * 100);
+                    if (b.in_flight_weight > 0 && percentage < 5) percentage = 5;
+                    document.getElementById('progress-' + suffix).style.width = percentage + '%';
+                });
+
+                // Update logs body
+                var logsBody = document.getElementById('logs-body');
+                if (data.recent_requests && data.recent_requests.length > 0) {
+                    logsBody.innerHTML = '';
+                    data.recent_requests.forEach(function(r) {
+                        var tr = document.createElement('tr');
+
+                        var classLabels = ['light', 'medium', 'heavy'];
+                        var predictedLabel = classLabels[r.predicted] || 'unknown';
+                        var actualLabel = classLabels[r.actual_route] || 'unknown';
+
+                        var statusStyle = r.status >= 200 && r.status < 300 ? 'color: var(--neon-green)' : 'color: var(--neon-red)';
+
+                        tr.innerHTML = '<td class="mono">' + r.timestamp + '</td>' +
+                            '<td class="mono"><strong>' + r.method + '</strong> ' + r.path + '</td>' +
+                            '<td class="mono">' + r.worker_id + '</td>' +
+                            '<td><span class="badge-class ' + predictedLabel + '">' + predictedLabel + '</span></td>' +
+                            '<td><span class="badge-class ' + actualLabel + '">' + actualLabel + '</span></td>' +
+                            '<td class="mono">' + r.processing_ms.toFixed(2) + 'ms</td>' +
+                            '<td class="mono" style="' + statusStyle + '; font-weight: bold;">' + r.status + '</td>';
+                        logsBody.appendChild(tr);
+                    });
+                }
+            } catch (err) {
+                console.error('Error fetching dashboard status:', err);
+            }
+        }
+
+        // Auto-update every 1 second
+        setInterval(updateStatus, 1000);
+        updateStatus(); // Initial call
+    </script>
+</body>
+</html>`
+
+	w.Write([]byte(htmlContent))
 }
 
 // ── Response Writer Wrapper ─────────────────────────────────
