@@ -32,10 +32,7 @@ logs-gateway: ## Tail gateway logs only
 	docker compose logs -f gateway
 
 logs-workers: ## Tail all worker logs
-	docker compose logs -f worker_1 worker_2 worker_3 worker_4
-
-logs-ml: ## Tail ML service logs
-	docker compose logs -f ml_service
+	docker compose logs -f worker_1 worker_2 worker_3 worker_4 worker_5
 
 # ── ML Pipeline ─────────────────────────────────────────
 VENV := ml/.venv/bin
@@ -50,14 +47,14 @@ harvest: ## Copy traffic.csv from the gateway volume to ml/data/
 	docker cp neuroroute-gateway:/data/traffic.csv ml/data/traffic.csv
 	@echo "✅ Harvested traffic.csv → ml/data/traffic.csv"
 
-train: ## Train the ML model from harvested traffic data
-	$(VENV)/python ml/train.py --data ml/data/traffic.csv --clean --output ml/model.pkl
-	@echo "✅ Model trained → ml/model.pkl"
+train: ## Train the ML model from harvested traffic data and export inline Go predictor
+	$(VENV)/python ml/train.py --data ml/data/traffic.csv --clean
+	@echo "✅ Model trained and inline Go predictor generated → gateway/predictor.go"
 
-deploy-model: ## Rebuild and restart the ML service with new model
-	docker compose build ml_service
-	docker compose up -d ml_service
-	@echo "✅ ML service redeployed with new model"
+deploy-model: ## Rebuild and restart the Go gateway service with new embedded predictor
+	docker compose build gateway
+	docker compose up -d gateway
+	@echo "✅ Gateway redeployed with new embedded predictor"
 
 enable-smart: ## Enable smart ML-powered routing
 	docker compose down gateway
@@ -71,11 +68,11 @@ disable-smart: ## Disable smart routing (fallback to round-robin)
 
 # ── Testing ──────────────────────────────────────────────
 smoke: ## Quick smoke test — ping the gateway
-	@echo "🔍 Pinging gateway..."
+	@echo "🔍 Pinging gateway health endpoint..."
 	@curl -s http://localhost:8000/ping | python3 -m json.tool || echo "❌ Gateway unreachable"
 	@echo ""
-	@echo "🔍 Pinging ML service..."
-	@curl -s http://localhost:8050/health | python3 -m json.tool || echo "❌ ML service unreachable"
+	@echo "🔍 Checking status pool information..."
+	@curl -s http://localhost:8000/status | python3 -m json.tool || echo "❌ Gateway status endpoint error"
 
 test: ## Run k6 load test (requires k6 installed)
 	K6_WEB_DASHBOARD=true k6 run loadtests/traffic_profile.js
@@ -90,10 +87,8 @@ test-smart: ## Load test with smart routing
 	sleep 2
 	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/smart_route.csv loadtests/traffic_profile.js
 
-
 compare: ## Compare Round-Robin vs Smart-Routing results and generate visual charts
 	$(VENV)/python scripts/compare.py
-
 
 # ── Cleanup ──────────────────────────────────────────────
 clean: ## Remove all containers, volumes, and images

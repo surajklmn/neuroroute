@@ -1,33 +1,32 @@
 // ──────────────────────────────────────────────────────────────
-//  NeuroRoute — AI-Driven Reverse Proxy Gateway
+//  NeuroRoute — AI-Driven Reverse Proxy Gateway (Embedded ML)
 //
 //  A production-grade Layer 7 reverse proxy that:
 //    1. Intercepts incoming HTTP requests
-//    2. Extracts request metadata (path, method, size, params)
-//    3. Queries the Python ML service for a prediction
-//    4. Routes light requests (label=0) round-robin to workers 1-3
-//    5. Routes heavy requests (label=1) directly to worker 4
-//
-//  Includes:
-//    • Async CSV traffic logging (zero request-path impact)
-//    • Connection-pooled HTTP client for ML queries
-//    • 30-second circuit breaker for downed workers
-//    • Graceful degradation to round-robin on ML failure
+//    2. Profiles request body structurally (<512 bytes)
+//    3. Extracts path, method, body, and query features
+//    4. Predicts weight class (0, 1, 2) in-line (<10µs)
+//    5. Routes using Weighted Least-Work load balancing across 3 lanes
+//    6. Tracks sliding window latency for drift detection
 // ──────────────────────────────────────────────────────────────
 
 package main
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,10 +37,9 @@ import (
 // ── Configuration ───────────────────────────────────────────
 
 type Config struct {
-	WorkerURLs       []string
-	HeavyWorkerURLs  []string
-	MLServiceURL     string
-	MLTimeoutMs      int
+	FastWorkerURLs   []string
+	MediumWorkerURLs []string
+	SlowWorkerURLs   []string
 	SmartRouting     bool
 	TrafficLogPath   string
 	Port             string
@@ -49,28 +47,19 @@ type Config struct {
 
 func loadConfig() Config {
 	cfg := Config{
-		MLServiceURL:   getEnv("ML_SERVICE_URL", "http://ml_service:8050"),
 		TrafficLogPath: getEnv("TRAFFIC_LOG_PATH", "/data/traffic.csv"),
 		Port:           "8000",
 	}
 
-	// Parse comma-separated worker URLs
-	workerStr := getEnv("WORKER_URLS", "http://worker_1:8001,http://worker_2:8002,http://worker_3:8003")
-	cfg.WorkerURLs = strings.Split(workerStr, ",")
+	fastStr := getEnv("FAST_WORKER_URLS", "http://worker_1:8080,http://worker_2:8080")
+	cfg.FastWorkerURLs = strings.Split(fastStr, ",")
 
-	// Parse comma-separated heavy worker URLs
-	heavyStr := getEnv("HEAVY_WORKER_URLS", getEnv("HEAVY_WORKER_URL", "http://worker_4:8004"))
-	cfg.HeavyWorkerURLs = strings.Split(heavyStr, ",")
+	mediumStr := getEnv("MEDIUM_WORKER_URLS", "http://worker_3:8080")
+	cfg.MediumWorkerURLs = strings.Split(mediumStr, ",")
 
-	// Parse ML timeout
-	timeoutStr := getEnv("ML_PREDICT_TIMEOUT_MS", "5")
-	timeout, err := strconv.Atoi(timeoutStr)
-	if err != nil {
-		timeout = 5
-	}
-	cfg.MLTimeoutMs = timeout
+	slowStr := getEnv("SLOW_WORKER_URLS", "http://worker_4:8080,http://worker_5:8080")
+	cfg.SlowWorkerURLs = strings.Split(slowStr, ",")
 
-	// Parse smart routing flag
 	cfg.SmartRouting = getEnv("SMART_ROUTING", "false") == "true"
 
 	return cfg
@@ -86,11 +75,12 @@ func getEnv(key, fallback string) string {
 // ── Backend Worker ──────────────────────────────────────────
 
 type Backend struct {
-	URL       *url.URL
-	Proxy     *httputil.ReverseProxy
-	Healthy   bool
-	DownSince time.Time
-	mu        sync.RWMutex
+	URL            *url.URL
+	Proxy          *httputil.ReverseProxy
+	Healthy        bool
+	DownSince      time.Time
+	InFlightWeight atomic.Int64 // Track cumulative weight of in-flight requests
+	mu             sync.RWMutex
 }
 
 func NewBackend(rawURL string) (*Backend, error) {
@@ -125,7 +115,7 @@ func (b *Backend) IsHealthy() bool {
 	if !b.Healthy {
 		// Check if 30 seconds have passed since going down
 		if time.Since(b.DownSince) > 30*time.Second {
-			// Attempt recovery (will be confirmed on next request)
+			// Attempt recovery
 			return true
 		}
 		return false
@@ -153,13 +143,15 @@ func (b *Backend) MarkUp() {
 // ── Traffic Logger (Async CSV) ──────────────────────────────
 
 type TrafficLog struct {
-	Timestamp      float64
-	URLPath        string
-	HTTPMethod     string
-	ContentLength  int64
-	QueryParams    string
-	ProcessingMs   float64
-	WorkerID       string
+	Timestamp        float64
+	URLPath          string
+	HTTPMethod       string
+	ContentLength    int64
+	QueryParams      string
+	ProcessingMs     float64
+	WorkerID         string
+	JSONKeyCount     float64
+	KeywordFrequency float64
 }
 
 type TrafficLogger struct {
@@ -188,6 +180,7 @@ func NewTrafficLogger(path string) (*TrafficLogger, error) {
 			"timestamp", "url_path", "http_method",
 			"content_length", "query_params",
 			"processing_time_ms", "worker_id",
+			"json_key_count", "keyword_frequency",
 		})
 		w.Flush()
 	}
@@ -205,7 +198,6 @@ func NewTrafficLogger(path string) (*TrafficLogger, error) {
 }
 
 func (tl *TrafficLogger) Log(entry TrafficLog) {
-	// Non-blocking send — drop log if channel full (never block requests)
 	select {
 	case tl.ch <- entry:
 	default:
@@ -226,8 +218,10 @@ func (tl *TrafficLogger) flusher() {
 				entry.HTTPMethod,
 				strconv.FormatInt(entry.ContentLength, 10),
 				entry.QueryParams,
-				fmt.Sprintf("%.3f", entry.ProcessingMs),
+				fmt.Sprintf("%.4f", entry.ProcessingMs),
 				entry.WorkerID,
+				fmt.Sprintf("%.2f", entry.JSONKeyCount),
+				fmt.Sprintf("%.2f", entry.KeywordFrequency),
 			})
 		case <-ticker.C:
 			tl.writer.Flush()
@@ -240,96 +234,148 @@ func (tl *TrafficLogger) Close() {
 	tl.file.Close()
 }
 
-// ── ML Client ───────────────────────────────────────────────
+// ── Feature Encoders ─────────────────────────────────────────
 
-type MLPrediction struct {
-	Label int `json:"label"`
+func encodePath(path string) float64 {
+	h := md5.Sum([]byte(path))
+	hexStr := hex.EncodeToString(h[:])[:8]
+	val, _ := strconv.ParseInt(hexStr, 16, 64)
+	return float64(val % 1000)
 }
 
-type MLRequest struct {
-	URLPath       string `json:"url_path"`
-	Method        string `json:"method"`
-	ContentLength int64  `json:"content_length"`
-	IsHeavyQuery  int    `json:"is_heavy_query"`
-}
-
-type MLClient struct {
-	serviceURL string
-	client     *http.Client
-}
-
-func NewMLClient(serviceURL string, timeoutMs int) *MLClient {
-	return &MLClient{
-		serviceURL: serviceURL,
-		client: &http.Client{
-			Timeout: time.Duration(timeoutMs) * time.Millisecond,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
-				DisableKeepAlives:   false,
-			},
-		},
+func encodeMethod(method string) float64 {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	switch method {
+	case "GET":
+		return 0
+	case "POST":
+		return 1
+	case "PUT":
+		return 2
+	case "DELETE":
+		return 3
+	case "PATCH":
+		return 4
+	default:
+		return 5
 	}
 }
 
-func (ml *MLClient) Predict(urlPath, method string, contentLength int64, queryParams string) (int, error) {
-	// Extract whether query params indicate heavy work
-	isHeavy := 0
-	if strings.Contains(queryParams, "heavy") || strings.Contains(queryParams, "matrix") {
-		isHeavy = 1
+func countJSONKeys(body []byte) float64 {
+	trimmed := strings.TrimSpace(string(body))
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return 0
+	}
+	count := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if ch == '\\' && inString {
+			escaped = !escaped
+			continue
+		}
+		if ch == '"' && !escaped {
+			inString = !inString
+		}
+		if ch == ':' && !inString {
+			count++
+		}
+		escaped = false
+	}
+	return float64(count)
+}
+
+func countHeavyKeywords(body []byte) float64 {
+	bodyStr := strings.ToLower(string(body))
+	keywords := []string{"heavy", "matrix", "sieve", "join", "select"}
+	count := 0
+	for _, kw := range keywords {
+		count += strings.Count(bodyStr, kw)
+	}
+	return float64(count)
+}
+
+// ── Drift Monitor ────────────────────────────────────────────
+
+type DriftMonitor struct {
+	mu         sync.Mutex
+	history    []float64
+	index      int
+	isTraining bool
+}
+
+func NewDriftMonitor() *DriftMonitor {
+	return &DriftMonitor{
+		history: make([]float64, 0, 100),
+	}
+}
+
+func (dm *DriftMonitor) Add(val float64) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	if len(dm.history) < 100 {
+		dm.history = append(dm.history, val)
+	} else {
+		dm.history[dm.index] = val
+		dm.index = (dm.index + 1) % 100
 	}
 
-	reqBody := MLRequest{
-		URLPath:       urlPath,
-		Method:        method,
-		ContentLength: contentLength,
-		IsHeavyQuery:  isHeavy,
+	if len(dm.history) == 100 {
+		var sum float64
+		for _, v := range dm.history {
+			sum += v
+		}
+		avg := sum / 100.0
+		if avg > 30.0 && !dm.isTraining {
+			log.Printf("[DRIFT_DETECTED] Average Class 0 execution time is %.2fms (> 30ms). Triggering background retraining...", avg)
+			dm.isTraining = true
+			go dm.triggerRetraining()
+		}
+	}
+}
+
+func (dm *DriftMonitor) triggerRetraining() {
+	defer func() {
+		dm.mu.Lock()
+		dm.isTraining = false
+		dm.mu.Unlock()
+	}()
+
+	log.Println("🔄 Retraining triggered by Drift Detector: executing 'make harvest && make train && make build'...")
+	cmd := exec.Command("sh", "-c", "make harvest && make train && make build")
+	
+	// Dynamically locate the directory containing the Makefile
+	for _, dir := range []string{"/app", "/src", ".", "/home/zefrus/Projects/neuroroute"} {
+		if _, err := os.Stat(dir + "/Makefile"); err == nil {
+			cmd.Dir = dir
+			break
+		}
 	}
 
-	body, err := json.Marshal(reqBody)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("marshal error: %w", err)
+		log.Printf("⚠️ Retraining command execution failed: %v. Output: %s", err, string(out))
+		return
 	}
-
-	resp, err := ml.client.Post(
-		ml.serviceURL+"/predict",
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("ML service error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("ML service returned %d", resp.StatusCode)
-	}
-
-	var pred MLPrediction
-	if err := json.NewDecoder(resp.Body).Decode(&pred); err != nil {
-		return 0, fmt.Errorf("decode error: %w", err)
-	}
-
-	return pred.Label, nil
+	log.Printf("✅ Retraining succeeded! Output: %s", string(out))
 }
 
 // ── Router ──────────────────────────────────────────────────
 
 type Router struct {
-	fastLane       []*Backend  // workers 1-3 (light requests)
-	slowLane       []*Backend  // workers 4-5 (heavy requests)
-	rrCounter      atomic.Uint64
-	slowRRCounter  atomic.Uint64
-	mlClient       *MLClient
-	logger         *TrafficLogger
-	smartMode      bool
+	fastLane     []*Backend // Class 0
+	mediumLane   []*Backend // Class 1
+	slowLane     []*Backend // Class 2
+	logger       *TrafficLogger
+	driftMonitor *DriftMonitor
+	smartMode    bool
 }
 
 func NewRouter(cfg Config) (*Router, error) {
-	// Initialize fast lane backends
 	var fastLane []*Backend
-	for _, u := range cfg.WorkerURLs {
+	for _, u := range cfg.FastWorkerURLs {
 		b, err := NewBackend(u)
 		if err != nil {
 			return nil, err
@@ -337,9 +383,17 @@ func NewRouter(cfg Config) (*Router, error) {
 		fastLane = append(fastLane, b)
 	}
 
-	// Initialize slow lane backends
+	var mediumLane []*Backend
+	for _, u := range cfg.MediumWorkerURLs {
+		b, err := NewBackend(u)
+		if err != nil {
+			return nil, err
+		}
+		mediumLane = append(mediumLane, b)
+	}
+
 	var slowLane []*Backend
-	for _, u := range cfg.HeavyWorkerURLs {
+	for _, u := range cfg.SlowWorkerURLs {
 		b, err := NewBackend(u)
 		if err != nil {
 			return nil, err
@@ -347,53 +401,89 @@ func NewRouter(cfg Config) (*Router, error) {
 		slowLane = append(slowLane, b)
 	}
 
-	// Initialize traffic logger
 	logger, err := NewTrafficLogger(cfg.TrafficLogPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Initialize ML client
-	mlClient := NewMLClient(cfg.MLServiceURL, cfg.MLTimeoutMs)
-
 	return &Router{
-		fastLane:  fastLane,
-		slowLane:  slowLane,
-		mlClient:  mlClient,
-		logger:    logger,
-		smartMode: cfg.SmartRouting,
+		fastLane:     fastLane,
+		mediumLane:   mediumLane,
+		slowLane:     slowLane,
+		logger:       logger,
+		driftMonitor: NewDriftMonitor(),
+		smartMode:    cfg.SmartRouting,
 	}, nil
 }
 
-// nextFastLane returns the next healthy backend in round-robin order.
-// If no healthy backend is available, returns nil.
-func (rt *Router) nextFastLane() *Backend {
-	total := len(rt.fastLane)
-	for i := 0; i < total; i++ {
-		idx := int(rt.rrCounter.Add(1)-1) % total
-		b := rt.fastLane[idx]
+// selectWeightedBackend selects the healthy backend in a pool with the lowest cumulative in-flight weight.
+func (rt *Router) selectWeightedBackend(pool []*Backend) *Backend {
+	var best *Backend
+	var minWeight int64 = math.MaxInt64
+
+	for _, b := range pool {
 		if b.IsHealthy() {
-			return b
+			w := b.InFlightWeight.Load()
+			if w < minWeight {
+				minWeight = w
+				best = b
+			}
 		}
 	}
-	return nil
+	return best
 }
 
-// nextSlowLane returns the next healthy slow-lane backend in round-robin order.
-// If no healthy backend is available, returns nil.
-func (rt *Router) nextSlowLane() *Backend {
-	total := len(rt.slowLane)
-	for i := 0; i < total; i++ {
-		idx := int(rt.slowRRCounter.Add(1)-1) % total
-		b := rt.slowLane[idx]
-		if b.IsHealthy() {
-			return b
+// getBackendForClass implements Weighted Least-Work selection with a robust cascading fallback structure.
+func (rt *Router) getBackendForClass(class int) (*Backend, int) {
+	var target *Backend
+	actualClass := class
+
+	switch class {
+	case 0:
+		// Target: Fast Lane
+		target = rt.selectWeightedBackend(rt.fastLane)
+		if target == nil {
+			log.Println("⚠️ All Fast Lane workers down, falling back to Medium Lane")
+			target = rt.selectWeightedBackend(rt.mediumLane)
+			actualClass = 1
+		}
+		if target == nil {
+			log.Println("⚠️ All Fast/Medium Lane workers down, falling back to Slow Lane")
+			target = rt.selectWeightedBackend(rt.slowLane)
+			actualClass = 2
+		}
+	case 1:
+		// Target: Medium Lane
+		target = rt.selectWeightedBackend(rt.mediumLane)
+		if target == nil {
+			log.Println("⚠️ Medium Lane worker down, falling back to Fast Lane")
+			target = rt.selectWeightedBackend(rt.fastLane)
+			actualClass = 0
+		}
+		if target == nil {
+			log.Println("⚠️ All Medium/Fast Lane workers down, falling back to Slow Lane")
+			target = rt.selectWeightedBackend(rt.slowLane)
+			actualClass = 2
+		}
+	case 2:
+		// Target: Slow Lane
+		target = rt.selectWeightedBackend(rt.slowLane)
+		if target == nil {
+			log.Println("⚠️ All Slow Lane workers down, falling back to Medium Lane")
+			target = rt.selectWeightedBackend(rt.mediumLane)
+			actualClass = 1
+		}
+		if target == nil {
+			log.Println("⚠️ All Slow/Medium Lane workers down, falling back to Fast Lane")
+			target = rt.selectWeightedBackend(rt.fastLane)
+			actualClass = 0
 		}
 	}
-	return nil
+
+	return target, actualClass
 }
 
-// ServeHTTP is the main request handler.
+// ServeHTTP is the main L7 request handler.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -401,8 +491,8 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/ping" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":       "ok",
-			"service":      "neuroroute-gateway",
+			"status":        "ok",
+			"service":       "neuroroute-gateway",
 			"smart_routing": rt.smartMode,
 		})
 		return
@@ -413,49 +503,73 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Determine target backend ──
-	var target *Backend
-	var label int
+	// ── Structural Body Profiling ──
+	var bodyBytes []byte
+	if r.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(io.LimitReader(r.Body, 512))
+		if err == nil {
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), r.Body))
+		}
+	}
+
+	jsonKeyCount := countJSONKeys(bodyBytes)
+	keywordFrequency := countHeavyKeywords(bodyBytes)
+
+	// ── Feature Engineering ──
+	urlPathEncoded := encodePath(r.URL.Path)
+	methodEncoded := encodeMethod(r.Method)
+	contentLength := float64(r.ContentLength)
+	if contentLength < 0 {
+		contentLength = 0
+	}
+
 	queryParams := r.URL.RawQuery
+	isHeavyQuery := 0.0
+	if strings.Contains(strings.ToLower(queryParams), "heavy") || strings.Contains(strings.ToLower(queryParams), "matrix") {
+		isHeavyQuery = 1.0
+	}
 
+	// ── Embedded Prediction ──
+	var predictedClass int
 	if rt.smartMode {
-		// Call ML service for prediction
-		predicted, err := rt.mlClient.Predict(
-			r.URL.Path,
-			r.Method,
-			r.ContentLength,
-			queryParams,
-		)
-		if err != nil {
-			// Fail-safe: default to fast lane on ML failure
-			log.Printf("⚠️  ML prediction failed (defaulting to fast lane): %v", err)
-			label = 0
-		} else {
-			label = predicted
+		features := []float64{
+			urlPathEncoded,
+			methodEncoded,
+			contentLength,
+			isHeavyQuery,
+			jsonKeyCount,
+			keywordFrequency,
 		}
+		predictedClass = Predict(features)
 	} else {
-		// Dumb mode: always round-robin to fast lane
-		label = 0
+		// Dumb mode: fallback to class 0
+		predictedClass = 0
 	}
 
-	// ── Route based on label ──
-	if label == 1 {
-		// Heavy → slow lane (round-robin across heavy workers)
-		target = rt.nextSlowLane()
-		if target == nil {
-			// Fallback: if all heavy workers are down, use fast lane
-			log.Println("⚠️  All slow lane workers down, falling back to fast lane")
-			target = rt.nextFastLane()
-		}
-	} else {
-		// Light → fast lane (round-robin workers 1-3)
-		target = rt.nextFastLane()
-	}
-
+	// ── Route selection & failover ──
+	target, actualClass := rt.getBackendForClass(predictedClass)
 	if target == nil {
 		http.Error(w, `{"error": "no healthy backends available"}`, http.StatusServiceUnavailable)
 		return
 	}
+
+	// Define weight mapping: Class 0 = 1, Class 1 = 10, Class 2 = 100
+	var classWeight int64
+	switch actualClass {
+	case 0:
+		classWeight = 1
+	case 1:
+		classWeight = 10
+	case 2:
+		classWeight = 100
+	default:
+		classWeight = 1
+	}
+
+	// Track in-flight weight atomically
+	target.InFlightWeight.Add(classWeight)
+	defer target.InFlightWeight.Add(-classWeight)
 
 	// ── Custom response writer to capture worker ID and status ──
 	crw := &captureResponseWriter{ResponseWriter: w}
@@ -463,56 +577,80 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ── Proxy the request ──
 	target.Proxy.ServeHTTP(crw, r)
 
-	// ── Check if proxy succeeded ──
-	// Note: We rely entirely on the active background health checker (which pings `/ping`)
-	// to mark backends DOWN. Marking them down here during active heavy load because of client timeouts
-	// causes cascading failures that spill heavy traffic into the fast lane.
 	if crw.statusCode >= 502 {
-		// Log proxy issues for debug but keep worker in pool unless health checker flags it
 		log.Printf("⚠️  Proxy returned status %d for backend %s", crw.statusCode, target.URL.Host)
 	}
 
-	// ── Log traffic asynchronously ──
-	elapsed := time.Since(start)
+	// ── Capture Telemetry ──
+	execTimeMsStr := crw.Header().Get("X-Execution-Time-Ms")
+	var processingMs float64
+	if execTimeMsStr != "" {
+		if val, err := strconv.ParseFloat(execTimeMsStr, 64); err == nil {
+			processingMs = val
+		}
+	}
+	if processingMs == 0 {
+		processingMs = float64(time.Since(start).Nanoseconds()) / 1e6
+	}
+
 	workerID := crw.Header().Get("X-Worker-ID")
 	if workerID == "" {
 		workerID = target.URL.Host
 	}
 
+	// Log traffic asynchronously
 	rt.logger.Log(TrafficLog{
-		Timestamp:     float64(start.UnixNano()) / 1e9,
-		URLPath:       r.URL.Path,
-		HTTPMethod:    r.Method,
-		ContentLength: r.ContentLength,
-		QueryParams:   queryParams,
-		ProcessingMs:  float64(elapsed.Nanoseconds()) / 1e6,
-		WorkerID:      workerID,
+		Timestamp:        float64(start.UnixNano()) / 1e9,
+		URLPath:          r.URL.Path,
+		HTTPMethod:       r.Method,
+		ContentLength:    r.ContentLength,
+		QueryParams:      queryParams,
+		ProcessingMs:     processingMs,
+		WorkerID:         workerID,
+		JSONKeyCount:     jsonKeyCount,
+		KeywordFrequency: keywordFrequency,
 	})
+
+	// ── Drift Detection (Class 0 requests only) ──
+	if actualClass == 0 {
+		rt.driftMonitor.Add(processingMs)
+	}
 }
 
-// handleStatus returns the health status of all backends.
+// handleStatus returns the health and active cumulative in-flight weight status of all backends.
 func (rt *Router) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	type backendStatus struct {
-		URL     string `json:"url"`
-		Healthy bool   `json:"healthy"`
-		Lane    string `json:"lane"`
+		URL            string `json:"url"`
+		Healthy        bool   `json:"healthy"`
+		Lane           string `json:"lane"`
+		InFlightWeight int64  `json:"in_flight_weight"`
 	}
 
 	var statuses []backendStatus
 	for _, b := range rt.fastLane {
 		statuses = append(statuses, backendStatus{
-			URL:     b.URL.String(),
-			Healthy: b.IsHealthy(),
-			Lane:    "fast",
+			URL:            b.URL.String(),
+			Healthy:        b.IsHealthy(),
+			Lane:           "fast",
+			InFlightWeight: b.InFlightWeight.Load(),
+		})
+	}
+	for _, b := range rt.mediumLane {
+		statuses = append(statuses, backendStatus{
+			URL:            b.URL.String(),
+			Healthy:        b.IsHealthy(),
+			Lane:           "medium",
+			InFlightWeight: b.InFlightWeight.Load(),
 		})
 	}
 	for _, b := range rt.slowLane {
 		statuses = append(statuses, backendStatus{
-			URL:     b.URL.String(),
-			Healthy: b.IsHealthy(),
-			Lane:    "slow",
+			URL:            b.URL.String(),
+			Healthy:        b.IsHealthy(),
+			Lane:           "slow",
+			InFlightWeight: b.InFlightWeight.Load(),
 		})
 	}
 
@@ -524,8 +662,6 @@ func (rt *Router) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // ── Response Writer Wrapper ─────────────────────────────────
 
-// captureResponseWriter wraps http.ResponseWriter to capture
-// the status code written by the reverse proxy.
 type captureResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -546,7 +682,6 @@ func (crw *captureResponseWriter) Write(b []byte) (int, error) {
 	return crw.ResponseWriter.Write(b)
 }
 
-// Implement http.Flusher for streaming support
 func (crw *captureResponseWriter) Flush() {
 	if flusher, ok := crw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
@@ -589,10 +724,9 @@ func main() {
 
 	log.Printf("🧠 NeuroRoute Gateway starting on :%s", cfg.Port)
 	log.Printf("   Smart routing: %v", cfg.SmartRouting)
-	log.Printf("   Fast lane workers: %v", cfg.WorkerURLs)
-	log.Printf("   Slow lane workers: %v", cfg.HeavyWorkerURLs)
-	log.Printf("   ML service: %s", cfg.MLServiceURL)
-	log.Printf("   ML timeout: %dms", cfg.MLTimeoutMs)
+	log.Printf("   Fast lane workers: %v", cfg.FastWorkerURLs)
+	log.Printf("   Medium lane workers: %v", cfg.MediumWorkerURLs)
+	log.Printf("   Slow lane workers: %v", cfg.SlowWorkerURLs)
 	log.Printf("   Traffic log: %s", cfg.TrafficLogPath)
 
 	router, err := NewRouter(cfg)
@@ -600,9 +734,9 @@ func main() {
 		log.Fatalf("❌ Failed to initialize router: %v", err)
 	}
 
-	// Collect all backends for health checking
-	allBackends := make([]*Backend, 0, len(router.fastLane)+len(router.slowLane))
+	allBackends := make([]*Backend, 0, len(router.fastLane)+len(router.mediumLane)+len(router.slowLane))
 	allBackends = append(allBackends, router.fastLane...)
+	allBackends = append(allBackends, router.mediumLane...)
 	allBackends = append(allBackends, router.slowLane...)
 
 	// Start background health checker (every 10 seconds)
