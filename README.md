@@ -128,7 +128,13 @@ make build
 make up
 ```
 
-### 2. Run the Smoke Test
+### 2. Set Up the ML Virtual Environment
+Initialize the Python virtual environment and install all machine learning dependencies:
+```bash
+make venv
+```
+
+### 3. Run the Smoke Test
 Verify that all pools are healthy and that the gateway correctly aggregates pool configurations:
 ```bash
 make smoke
@@ -155,7 +161,7 @@ To manually test the L7 reverse-proxy's real-time routing decisions, execute the
     ```
     *   **Expected Headers**: Look for `X-Worker-ID: 4` or `5`, with CPU-heavy execution times exceeding $200\text{ms}$.
 
-### 3. Run Baseline & retrain
+### 4. Run Baseline & retrain
 Run the baseline stress tests, harvest accurate executions telemetry, train the Random Forest model and compile it inline into the gateway:
 ```bash
 make test-rr
@@ -163,14 +169,14 @@ make harvest
 make train
 ```
 
-### 4. Deploy and Verify Smart Routing
+### 5. Deploy and Verify Smart Routing
 Redeploy the gateway with the inline compiled model and launch the predictive stress tests:
 ```bash
 make deploy-model
 make test-smart
 ```
 
-### 5. Compare Performance Graphs
+### 6. Compare Performance Graphs
 Generate statistical comparisons and performance charts:
 ```bash
 make compare

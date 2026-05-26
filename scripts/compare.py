@@ -2,8 +2,8 @@
 ──────────────────────────────────────────────────────────────
  NeuroRoute — Benchmark Comparison Script
 
- Parses raw k6 timeseries CSV files from both Round-Robin and
- Smart-Routing test runs, computes comprehensive metrics,
+ Parses raw k6 timeseries CSV files from both Unsegregated Baseline
+ and Smart-Routing test runs, computes comprehensive metrics,
  prints a beautifully formatted terminal summary, and exports
  a comparative visualization chart.
 

@@ -61,10 +61,10 @@ enable-smart: ## Enable smart ML-powered routing
 	SMART_ROUTING=true docker compose up -d gateway
 	@echo "✅ Smart routing ENABLED"
 
-disable-smart: ## Disable smart routing (fallback to round-robin)
+disable-smart: ## Disable smart routing (fallback to least-work baseline)
 	docker compose down gateway
 	SMART_ROUTING=false docker compose up -d gateway
-	@echo "✅ Smart routing DISABLED (round-robin)"
+	@echo "✅ Smart routing DISABLED (least-work baseline)"
 
 # ── Testing ──────────────────────────────────────────────
 smoke: ## Quick smoke test — ping the gateway
@@ -77,7 +77,7 @@ smoke: ## Quick smoke test — ping the gateway
 test: ## Run k6 load test (requires k6 installed)
 	K6_WEB_DASHBOARD=true k6 run loadtests/traffic_profile.js
 
-test-rr: ## Load test with round-robin only
+test-rr: ## Load test with unsegregated least-work baseline
 	SMART_ROUTING=false docker compose up -d gateway
 	sleep 2
 	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/unsegregated.csv loadtests/traffic_profile.js
@@ -87,7 +87,7 @@ test-smart: ## Load test with smart routing
 	sleep 2
 	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/smart_route.csv loadtests/traffic_profile.js
 
-compare: ## Compare Round-Robin vs Smart-Routing results and generate visual charts
+compare: ## Compare unsegregated baseline vs Smart-Routing results and generate visual charts
 	$(VENV)/python scripts/compare.py
 
 # ── Cleanup ──────────────────────────────────────────────
