@@ -84,6 +84,7 @@ type Backend struct {
 }
 
 func NewBackend(rawURL string) (*Backend, error) {
+	rawURL = strings.TrimSpace(rawURL)
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid worker URL %q: %w", rawURL, err)
@@ -1539,7 +1540,7 @@ func startHealthChecker(backends []*Backend, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	for range ticker.C {
 		for _, b := range backends {
