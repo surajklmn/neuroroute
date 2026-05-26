@@ -21,7 +21,7 @@ services:
       - "${GATEWAY_PORT:-8000}:8000"
     environment:
       - WORKER_URLS=http://worker_1:8080,http://worker_2:8080,http://worker_3:8080
-      - HEAVY_WORKER_URL=http://worker_4:8080
+      - HEAVY_WORKER_URLS=http://worker_4:8080,http://worker_5:8080
       - ML_SERVICE_URL=${ML_SERVICE_URL:-http://ml_service:8050}
       - ML_PREDICT_TIMEOUT_MS=${ML_PREDICT_TIMEOUT_MS:-5}
       - SMART_ROUTING=${SMART_ROUTING:-false}
@@ -44,6 +44,8 @@ services:
       worker_3:
         condition: service_started
       worker_4:
+        condition: service_started
+      worker_5:
         condition: service_started
     restart: unless-stopped
 
@@ -115,6 +117,25 @@ services:
       - "${WORKER_4_PORT:-8004}:8080"
     environment:
       - WORKER_ID=4
+      - PORT=8080
+    networks:
+      - neuronet
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    restart: unless-stopped
+
+  worker_5:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: neuroroute-worker-5
+    ports:
+      - "${WORKER_5_PORT:-8005}:8080"
+    environment:
+      - WORKER_ID=5
       - PORT=8080
     networks:
       - neuronet

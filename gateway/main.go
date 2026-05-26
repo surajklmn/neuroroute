@@ -39,7 +39,7 @@ import (
 
 type Config struct {
 	WorkerURLs       []string
-	HeavyWorkerURL   string
+	HeavyWorkerURLs  []string
 	MLServiceURL     string
 	MLTimeoutMs      int
 	SmartRouting     bool
@@ -50,7 +50,6 @@ type Config struct {
 func loadConfig() Config {
 	cfg := Config{
 		MLServiceURL:   getEnv("ML_SERVICE_URL", "http://ml_service:8050"),
-		HeavyWorkerURL: getEnv("HEAVY_WORKER_URL", "http://worker_4:8004"),
 		TrafficLogPath: getEnv("TRAFFIC_LOG_PATH", "/data/traffic.csv"),
 		Port:           "8000",
 	}
@@ -58,6 +57,10 @@ func loadConfig() Config {
 	// Parse comma-separated worker URLs
 	workerStr := getEnv("WORKER_URLS", "http://worker_1:8001,http://worker_2:8002,http://worker_3:8003")
 	cfg.WorkerURLs = strings.Split(workerStr, ",")
+
+	// Parse comma-separated heavy worker URLs
+	heavyStr := getEnv("HEAVY_WORKER_URLS", getEnv("HEAVY_WORKER_URL", "http://worker_4:8004"))
+	cfg.HeavyWorkerURLs = strings.Split(heavyStr, ",")
 
 	// Parse ML timeout
 	timeoutStr := getEnv("ML_PREDICT_TIMEOUT_MS", "5")
@@ -314,12 +317,13 @@ func (ml *MLClient) Predict(urlPath, method string, contentLength int64, queryPa
 // ── Router ──────────────────────────────────────────────────
 
 type Router struct {
-	fastLane   []*Backend  // workers 1-3
-	slowLane   *Backend    // worker 4
-	rrCounter  atomic.Uint64
-	mlClient   *MLClient
-	logger     *TrafficLogger
-	smartMode  bool
+	fastLane       []*Backend  // workers 1-3 (light requests)
+	slowLane       []*Backend  // workers 4-5 (heavy requests)
+	rrCounter      atomic.Uint64
+	slowRRCounter  atomic.Uint64
+	mlClient       *MLClient
+	logger         *TrafficLogger
+	smartMode      bool
 }
 
 func NewRouter(cfg Config) (*Router, error) {
@@ -333,10 +337,14 @@ func NewRouter(cfg Config) (*Router, error) {
 		fastLane = append(fastLane, b)
 	}
 
-	// Initialize slow lane backend
-	slowLane, err := NewBackend(cfg.HeavyWorkerURL)
-	if err != nil {
-		return nil, err
+	// Initialize slow lane backends
+	var slowLane []*Backend
+	for _, u := range cfg.HeavyWorkerURLs {
+		b, err := NewBackend(u)
+		if err != nil {
+			return nil, err
+		}
+		slowLane = append(slowLane, b)
 	}
 
 	// Initialize traffic logger
@@ -364,6 +372,20 @@ func (rt *Router) nextFastLane() *Backend {
 	for i := 0; i < total; i++ {
 		idx := int(rt.rrCounter.Add(1)-1) % total
 		b := rt.fastLane[idx]
+		if b.IsHealthy() {
+			return b
+		}
+	}
+	return nil
+}
+
+// nextSlowLane returns the next healthy slow-lane backend in round-robin order.
+// If no healthy backend is available, returns nil.
+func (rt *Router) nextSlowLane() *Backend {
+	total := len(rt.slowLane)
+	for i := 0; i < total; i++ {
+		idx := int(rt.slowRRCounter.Add(1)-1) % total
+		b := rt.slowLane[idx]
 		if b.IsHealthy() {
 			return b
 		}
@@ -418,12 +440,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// ── Route based on label ──
 	if label == 1 {
-		// Heavy → slow lane (worker 4)
-		if rt.slowLane.IsHealthy() {
-			target = rt.slowLane
-		} else {
-			// Fallback: if heavy worker is down, use fast lane
-			log.Println("⚠️  Slow lane worker down, falling back to fast lane")
+		// Heavy → slow lane (round-robin across heavy workers)
+		target = rt.nextSlowLane()
+		if target == nil {
+			// Fallback: if all heavy workers are down, use fast lane
+			log.Println("⚠️  All slow lane workers down, falling back to fast lane")
 			target = rt.nextFastLane()
 		}
 	} else {
@@ -487,11 +508,13 @@ func (rt *Router) handleStatus(w http.ResponseWriter, r *http.Request) {
 			Lane:    "fast",
 		})
 	}
-	statuses = append(statuses, backendStatus{
-		URL:     rt.slowLane.URL.String(),
-		Healthy: rt.slowLane.IsHealthy(),
-		Lane:    "slow",
-	})
+	for _, b := range rt.slowLane {
+		statuses = append(statuses, backendStatus{
+			URL:     b.URL.String(),
+			Healthy: b.IsHealthy(),
+			Lane:    "slow",
+		})
+	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"smart_routing": rt.smartMode,
@@ -567,7 +590,7 @@ func main() {
 	log.Printf("🧠 NeuroRoute Gateway starting on :%s", cfg.Port)
 	log.Printf("   Smart routing: %v", cfg.SmartRouting)
 	log.Printf("   Fast lane workers: %v", cfg.WorkerURLs)
-	log.Printf("   Slow lane worker: %s", cfg.HeavyWorkerURL)
+	log.Printf("   Slow lane workers: %v", cfg.HeavyWorkerURLs)
 	log.Printf("   ML service: %s", cfg.MLServiceURL)
 	log.Printf("   ML timeout: %dms", cfg.MLTimeoutMs)
 	log.Printf("   Traffic log: %s", cfg.TrafficLogPath)
@@ -578,9 +601,9 @@ func main() {
 	}
 
 	// Collect all backends for health checking
-	allBackends := make([]*Backend, 0, len(router.fastLane)+1)
+	allBackends := make([]*Backend, 0, len(router.fastLane)+len(router.slowLane))
 	allBackends = append(allBackends, router.fastLane...)
-	allBackends = append(allBackends, router.slowLane)
+	allBackends = append(allBackends, router.slowLane...)
 
 	// Start background health checker (every 10 seconds)
 	go startHealthChecker(allBackends, 10*time.Second)
@@ -589,7 +612,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 

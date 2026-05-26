@@ -20,6 +20,7 @@ import numpy as np
 # Try to import matplotlib for charting, fail gracefully if not available
 try:
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
     CHARTING_AVAILABLE = True
 except ImportError:
     CHARTING_AVAILABLE = False
@@ -38,7 +39,7 @@ def parse_k6_csv(filepath):
     print(f"📖 Parsing raw metrics from {filepath}...")
     
     # Read CSV
-    df = pd.read_csv(filepath)
+    df = pd.read_csv(filepath, low_memory=False)
     
     # Filter for request duration metric only
     df_reqs = df[df['metric_name'] == 'http_req_duration'].copy()
@@ -129,73 +130,255 @@ def print_comparison_table(rr_stats, smart_stats):
         print("\n" + "─" * 80 + "\n")
 
 def generate_visualizations(rr_df, smart_df):
-    """Plot publication-quality comparison charts using matplotlib."""
+    """Plot publication-quality 4-panel comparison charts using matplotlib."""
     if not CHARTING_AVAILABLE:
         print("⚠️  matplotlib is not installed in the local virtual environment. Skipping charting.")
         return
         
     print(f"🎨 Generating visualization chart → {OUTPUT_CHART}")
     
-    # Filter out light requests for both runs
+    # ── Prepare data slices ──
     rr_light = rr_df[~rr_df['is_heavy']]['metric_value']
     sm_light = smart_df[~smart_df['is_heavy']]['metric_value']
+    rr_heavy = rr_df[rr_df['is_heavy']]['metric_value']
+    sm_heavy = smart_df[smart_df['is_heavy']]['metric_value']
     
-    # Create figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), sharey=False)
+    # ── Color palette ──
+    C_RR = '#f87171'       # Warm coral red
+    C_RR_DARK = '#dc2626'  # Darker red for accents
+    C_SM = '#4ade80'       # Fresh green
+    C_SM_DARK = '#16a34a'  # Darker green for accents
+    C_BG = '#0f172a'       # Slate 900 background
+    C_CARD = '#1e293b'     # Slate 800 card background
+    C_TEXT = '#e2e8f0'     # Slate 200 text
+    C_MUTED = '#94a3b8'    # Slate 400 muted text
+    C_GRID = '#334155'     # Slate 700 grid lines
     
-    # Style configuration
-    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
+    # ── Create figure ──
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.patch.set_facecolor(C_BG)
     
-    # ── Chart 1: Light Request Latency Distribution (Boxplot) ──
-    box_data = [rr_light, sm_light]
-    bp = ax1.boxplot(box_data, patch_artist=True, labels=['Round-Robin\n(Unmanaged)', 'NeuroRoute\n(ML-Insulated)'])
+    for ax in axes.flat:
+        ax.set_facecolor(C_CARD)
+        ax.tick_params(colors=C_TEXT, labelsize=9)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_color(C_GRID)
+        ax.spines['left'].set_color(C_GRID)
+        ax.yaxis.label.set_color(C_TEXT)
+        ax.xaxis.label.set_color(C_TEXT)
+        ax.title.set_color(C_TEXT)
     
-    # Color settings
-    colors = ['#f87171', '#4ade80'] # Sleek red and green
-    for patch, color in zip(bp['boxes'], colors):
+    # ═══════════════════════════════════════════════════════════
+    # Panel 1: Light Request Latency Distribution (Box Plot)
+    # ═══════════════════════════════════════════════════════════
+    ax1 = axes[0, 0]
+    
+    box_data = [rr_light.values, sm_light.values]
+    bp = ax1.boxplot(
+        box_data,
+        patch_artist=True,
+        tick_labels=['Round-Robin\n(Unmanaged)', 'NeuroRoute\n(ML-Insulated)'],
+        widths=0.5,
+        showfliers=True,
+        flierprops=dict(marker='o', markersize=3, alpha=0.3),
+    )
+    
+    for patch, color in zip(bp['boxes'], [C_RR, C_SM]):
         patch.set_facecolor(color)
-        patch.set_alpha(0.7)
+        patch.set_alpha(0.75)
+        patch.set_edgecolor('white')
+        patch.set_linewidth(1.2)
     for median in bp['medians']:
-        median.set(color='#1e293b', linewidth=2)
-        
-    ax1.set_title("Light request Latency (Head-of-Line Blocking Proof)", fontsize=12, fontweight='bold', pad=15)
-    ax1.set_ylabel("Latency (milliseconds)", fontsize=10)
-    ax1.set_yscale('log') # Logarithmic scale since RR is massive compared to Smart
+        median.set(color='white', linewidth=2)
+    for whisker in bp['whiskers']:
+        whisker.set(color=C_MUTED, linewidth=1)
+    for cap in bp['caps']:
+        cap.set(color=C_MUTED, linewidth=1)
     
-    # ── Chart 2: p95 Latency comparison (Bar Chart) ──
-    labels = ['Overall Avg', 'Light p95', 'Heavy p95']
+    ax1.set_title("Light Request Latency\n(Head-of-Line Blocking Proof)", fontsize=12, fontweight='bold', pad=12)
+    ax1.set_ylabel("Latency (ms)", fontsize=10)
+    ax1.set_yscale('log')
+    ax1.yaxis.set_major_formatter(ticker.ScalarFormatter())
+    ax1.grid(axis='y', alpha=0.2, color=C_GRID)
     
-    rr_bar = [
-        np.mean(rr_df['metric_value']),
-        np.percentile(rr_light, 95) if len(rr_light) > 0 else 0,
-        np.percentile(rr_df[rr_df['is_heavy']]['metric_value'], 95) if len(rr_df[rr_df['is_heavy']]) > 0 else 0
+    # Add improvement annotation (use p95 — tail latency is what matters)
+    rr_p95 = np.percentile(rr_light, 95)
+    sm_p95 = np.percentile(sm_light, 95)
+    imp = ((rr_p95 - sm_p95) / rr_p95 * 100)
+    ax1.annotate(
+        f'p95: {imp:+.0f}% lower',
+        xy=(2, sm_p95), xytext=(2.35, sm_p95 * 1.5),
+        fontsize=10, fontweight='bold', color=C_SM,
+        arrowprops=dict(arrowstyle='->', color=C_SM, lw=1.5),
+        ha='left',
+    )
+    
+    # ═══════════════════════════════════════════════════════════
+    # Panel 2: Latency Breakdown — Avg & p95 for Light + Heavy
+    # ═══════════════════════════════════════════════════════════
+    ax2 = axes[0, 1]
+    
+    categories = ['Light\nAvg', 'Light\np95', 'Heavy\nAvg', 'Heavy\np95']
+    rr_vals = [
+        np.mean(rr_light),
+        np.percentile(rr_light, 95),
+        np.mean(rr_heavy) if len(rr_heavy) > 0 else 0,
+        np.percentile(rr_heavy, 95) if len(rr_heavy) > 0 else 0,
+    ]
+    sm_vals = [
+        np.mean(sm_light),
+        np.percentile(sm_light, 95),
+        np.mean(sm_heavy) if len(sm_heavy) > 0 else 0,
+        np.percentile(sm_heavy, 95) if len(sm_heavy) > 0 else 0,
     ]
     
-    sm_bar = [
-        np.mean(smart_df['metric_value']),
-        np.percentile(sm_light, 95) if len(sm_light) > 0 else 0,
-        np.percentile(smart_df[smart_df['is_heavy']]['metric_value'], 95) if len(smart_df[smart_df['is_heavy']]) > 0 else 0
-    ]
+    x = np.arange(len(categories))
+    width = 0.32
     
-    x = np.arange(len(labels))
-    width = 0.35
+    bars_rr = ax2.bar(x - width/2, rr_vals, width, label='Round-Robin', color=C_RR, alpha=0.85, edgecolor='white', linewidth=0.5)
+    bars_sm = ax2.bar(x + width/2, sm_vals, width, label='NeuroRoute', color=C_SM, alpha=0.85, edgecolor='white', linewidth=0.5)
     
-    ax2.bar(x - width/2, rr_bar, width, label='Round-Robin', color='#f87171', alpha=0.8)
-    ax2.bar(x + width/2, sm_bar, width, label='NeuroRoute', color='#4ade80', alpha=0.8)
+    # Add value labels on bars
+    for bar_group, color in [(bars_rr, C_RR_DARK), (bars_sm, C_SM_DARK)]:
+        for bar in bar_group:
+            height = bar.get_height()
+            if height > 0:
+                label = f'{height:.0f}' if height >= 10 else f'{height:.1f}'
+                ax2.text(
+                    bar.get_x() + bar.get_width() / 2., height * 1.1,
+                    label, ha='center', va='bottom', fontsize=7.5,
+                    color=C_TEXT, fontweight='bold',
+                )
     
-    ax2.set_title("p95 Latency Breakdown per Pool", fontsize=12, fontweight='bold', pad=15)
-    ax2.set_ylabel("Latency (milliseconds)", fontsize=10)
+    ax2.set_title("Latency Breakdown by Request Type", fontsize=12, fontweight='bold', pad=12)
+    ax2.set_ylabel("Latency (ms)", fontsize=10)
     ax2.set_xticks(x)
-    ax2.set_xticklabels(labels)
+    ax2.set_xticklabels(categories, fontsize=9)
     ax2.set_yscale('log')
-    ax2.legend(frameon=True, facecolor='white', edgecolor='none')
+    ax2.yaxis.set_major_formatter(ticker.ScalarFormatter())
+    ax2.legend(frameon=True, facecolor=C_CARD, edgecolor=C_GRID, labelcolor=C_TEXT, fontsize=9, loc='upper left')
+    ax2.grid(axis='y', alpha=0.2, color=C_GRID)
     
-    plt.suptitle("NeuroRoute AI-Driven Predictive Load Balancer Benchmarks", fontsize=16, fontweight='bold', y=0.98)
-    plt.tight_layout()
+    # ═══════════════════════════════════════════════════════════
+    # Panel 3: Error Rate % Comparison (fair — normalised by request count)
+    # error_code 1502 = HTTP 502 from backend
+    # error_code 1050 = k6 client-side connection timeout (status == 0)
+    # ═══════════════════════════════════════════════════════════
+    ax3 = axes[1, 0]
+
+    rr_n = len(rr_df)
+    sm_n = len(smart_df)
+
+    # Use error_code column for precise categorisation (more reliable than status cast)
+    rr_ec = rr_df['error_code'].fillna(0).astype(float)
+    sm_ec = smart_df['error_code'].fillna(0).astype(float)
+
+    rr_total_rate   = (rr_df['is_error'].sum()    / rr_n) * 100
+    sm_total_rate   = (smart_df['is_error'].sum() / sm_n) * 100
+    rr_502_rate     = ((rr_ec == 1502).sum()       / rr_n) * 100
+    sm_502_rate     = ((sm_ec == 1502).sum()       / sm_n) * 100
+    rr_timeout_rate = ((rr_ec == 1050).sum()       / rr_n) * 100
+    sm_timeout_rate = ((sm_ec == 1050).sum()       / sm_n) * 100
+
+    err_categories = ['Total Error\nRate', '502 Rate\n(Backend)', 'Client Timeout\nRate (k6 cutoff)']
+    rr_err_vals = [rr_total_rate, rr_502_rate, rr_timeout_rate]
+    sm_err_vals = [sm_total_rate, sm_502_rate, sm_timeout_rate]
+
+    x3 = np.arange(len(err_categories))
+
+    bars_rr3 = ax3.bar(x3 - width/2, rr_err_vals, width, label='Round-Robin', color=C_RR, alpha=0.85, edgecolor='white', linewidth=0.5)
+    bars_sm3 = ax3.bar(x3 + width/2, sm_err_vals, width, label='NeuroRoute', color=C_SM, alpha=0.85, edgecolor='white', linewidth=0.5)
+
+    # Value labels
+    for bar_group in [bars_rr3, bars_sm3]:
+        for bar in bar_group:
+            height = bar.get_height()
+            label = f'{height:.2f}%'
+            ypos  = height + 0.05
+            ax3.text(bar.get_x() + bar.get_width() / 2., ypos, label,
+                     ha='center', va='bottom', fontsize=8.5, color=C_TEXT, fontweight='bold')
+
+    # Highlight zero client-timeout achievement
+    if sm_timeout_rate == 0:
+        ax3.annotate(
+            '0% — Eliminated! ✓',
+            xy=(2 + width/2, 0.02), xytext=(2 + width/2, rr_timeout_rate * 0.6),
+            fontsize=9, fontweight='bold', color=C_SM,
+            arrowprops=dict(arrowstyle='->', color=C_SM, lw=1.5),
+            ha='center',
+        )
+
+    ax3.set_title("Error Rates — Normalised by Request Count\n"
+                  "(1502 = backend 502  |  1050 = k6 client timeout)",
+                  fontsize=11, fontweight='bold', pad=12)
+    ax3.set_ylabel("Error Rate (%)", fontsize=10)
+    ax3.set_xticks(x3)
+    ax3.set_xticklabels(err_categories, fontsize=8.5)
+    ax3.legend(frameon=True, facecolor=C_CARD, edgecolor=C_GRID, labelcolor=C_TEXT, fontsize=9)
+    ax3.grid(axis='y', alpha=0.2, color=C_GRID)
+    
+    # ═══════════════════════════════════════════════════════════
+    # Panel 4: Overall Summary — Key Wins
+    # ═══════════════════════════════════════════════════════════
+    ax4 = axes[1, 1]
+    
+    # Calculate key metrics
+    rr_light_avg = np.mean(rr_light)
+    sm_light_avg = np.mean(sm_light)
+    light_improvement = ((rr_light_avg - sm_light_avg) / rr_light_avg * 100)
+    
+    rr_error_rate = (rr_df['is_error'].sum() / len(rr_df)) * 100
+    sm_error_rate = (smart_df['is_error'].sum() / len(smart_df)) * 100
+    error_reduction = ((rr_error_rate - sm_error_rate) / rr_error_rate * 100) if rr_error_rate > 0 else 0
+    
+    rr_overall_avg = np.mean(rr_df['metric_value'])
+    sm_overall_avg = np.mean(smart_df['metric_value'])
+    overall_improvement = ((rr_overall_avg - sm_overall_avg) / rr_overall_avg * 100)
+    
+    metrics = [
+        ('Light Latency\nReduction', light_improvement),
+        ('Error Rate\nReduction', error_reduction),
+        ('Overall Avg\nImprovement', overall_improvement),
+    ]
+    
+    x4 = np.arange(len(metrics))
+    values = [m[1] for m in metrics]
+    labels = [m[0] for m in metrics]
+    colors_bar = [C_SM if v > 0 else C_RR for v in values]
+    
+    bars4 = ax4.bar(x4, values, 0.55, color=colors_bar, alpha=0.85, edgecolor='white', linewidth=0.5)
+    
+    for bar, val in zip(bars4, values):
+        ax4.text(
+            bar.get_x() + bar.get_width() / 2., bar.get_height() + 1,
+            f'{val:+.1f}%', ha='center', va='bottom', fontsize=12,
+            color=C_SM if val > 0 else C_RR, fontweight='bold',
+        )
+    
+    ax4.set_title("NeuroRoute Key Wins (% Improvement)", fontsize=12, fontweight='bold', pad=12)
+    ax4.set_ylabel("Improvement %", fontsize=10)
+    ax4.set_xticks(x4)
+    ax4.set_xticklabels(labels, fontsize=9)
+    ax4.axhline(y=0, color=C_MUTED, linewidth=0.8, linestyle='--')
+    ax4.grid(axis='y', alpha=0.2, color=C_GRID)
+    
+    # ── Final layout ──
+    fig.suptitle(
+        "NeuroRoute — AI-Driven Predictive Load Balancer Benchmarks",
+        fontsize=18, fontweight='bold', color=C_TEXT, y=0.98,
+    )
+    fig.text(
+        0.5, 0.01,
+        "100 VUs × 2 min   |   80% Light / 20% Heavy Traffic Mix   |   Positive % = NeuroRoute wins",
+        ha='center', fontsize=10, color=C_MUTED, style='italic',
+    )
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
     # Create parent dirs if necessary
     os.makedirs(os.path.dirname(OUTPUT_CHART), exist_ok=True)
-    plt.savefig(OUTPUT_CHART, dpi=300, bbox_inches='tight')
+    plt.savefig(OUTPUT_CHART, dpi=300, bbox_inches='tight', facecolor=C_BG)
     print(f"✅ Success! Comparative chart saved to: {OUTPUT_CHART}")
 
 def main():
