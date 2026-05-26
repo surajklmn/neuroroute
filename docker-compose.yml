@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────
-#  NeuroRoute — Docker Compose Topology
+#  NeuroRoute — Docker Compose Topology (Embedded ML Upgrade)
 #  AI-Driven Predictive Layer 7 Load Balancer
 # ──────────────────────────────────────────────────────────────
 
@@ -20,10 +20,9 @@ services:
     ports:
       - "${GATEWAY_PORT:-8000}:8000"
     environment:
-      - WORKER_URLS=http://worker_1:8080,http://worker_2:8080,http://worker_3:8080
-      - HEAVY_WORKER_URLS=http://worker_4:8080,http://worker_5:8080
-      - ML_SERVICE_URL=${ML_SERVICE_URL:-http://ml_service:8050}
-      - ML_PREDICT_TIMEOUT_MS=${ML_PREDICT_TIMEOUT_MS:-5}
+      - FAST_WORKER_URLS=http://worker_1:8080,http://worker_2:8080
+      - MEDIUM_WORKER_URLS=http://worker_3:8080
+      - SLOW_WORKER_URLS=http://worker_4:8080,http://worker_5:8080
       - SMART_ROUTING=${SMART_ROUTING:-false}
       - TRAFFIC_LOG_PATH=${TRAFFIC_LOG_PATH:-/data/traffic.csv}
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -49,7 +48,7 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # ── Fast Lane Workers (Light Requests) ────────────────────
+  # ── Fast Lane Workers (Class 0: Light Requests) ───────────
   worker_1:
     build:
       context: ./workers
@@ -65,8 +64,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-          memory: 256M
+          cpus: "0.25"
+          memory: 128M
     restart: unless-stopped
 
   worker_2:
@@ -84,10 +83,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-          memory: 256M
+          cpus: "0.25"
+          memory: 128M
     restart: unless-stopped
 
+  # ── Medium Lane Worker (Class 1: Medium Requests) ─────────
   worker_3:
     build:
       context: ./workers
@@ -103,11 +103,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: "0.50"
           memory: 256M
     restart: unless-stopped
 
-  # ── Slow Lane Worker (Heavy Requests) ─────────────────────
+  # ── Slow Lane Workers (Class 2: Heavy Requests) ───────────
   worker_4:
     build:
       context: ./workers
@@ -123,7 +123,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
+          cpus: "1.00"
           memory: 512M
     restart: unless-stopped
 
@@ -142,28 +142,6 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
+          cpus: "1.00"
           memory: 512M
-    restart: unless-stopped
-
-  # ── Python ML Prediction Service ──────────────────────────
-  ml_service:
-    build:
-      context: ./ml
-      dockerfile: Dockerfile
-    container_name: neuroroute-ml
-    ports:
-      - "${ML_SERVICE_PORT:-8050}:8050"
-    environment:
-      - MODEL_PATH=/app/model.pkl
-      - PORT=8050
-    volumes:
-      - traffic_data:/data:ro
-    networks:
-      - neuronet
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 256M
     restart: unless-stopped

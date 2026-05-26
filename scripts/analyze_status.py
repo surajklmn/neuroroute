@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-for name, path in [("Round-Robin", "loadtests/results/round_robin.csv"), ("Smart", "loadtests/results/smart_route.csv")]:
+for name, path in [("Unsegregated", "loadtests/results/unsegregated.csv"), ("Smart", "loadtests/results/smart_route.csv")]:
     df = pd.read_csv(path, low_memory=False)
     reqs = df[df['metric_name'] == 'http_req_duration'].copy()
     reqs['metric_value'] = reqs['metric_value'].astype(float)

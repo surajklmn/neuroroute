@@ -112,6 +112,7 @@ func handleWork(w http.ResponseWriter, r *http.Request) {
 // handleLightWork reads the request body and hashes it with
 // SHA-256 a total of 1000 times. This is a fast CPU-bound task.
 func handleLightWork(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, `{"error": "failed to read body"}`, http.StatusBadRequest)
@@ -131,6 +132,9 @@ func handleLightWork(w http.ResponseWriter, r *http.Request) {
 		hash = h[:]
 	}
 
+	duration := float64(time.Since(start).Nanoseconds()) / 1e6
+	w.Header().Set("X-Execution-Time-Ms", fmt.Sprintf("%.4f", duration))
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"worker_id":  workerID,
 		"task":       "light",
@@ -143,6 +147,7 @@ func handleLightWork(w http.ResponseWriter, r *http.Request) {
 // the Sieve of Eratosthenes. This is a CPU-intensive task that
 // generates realistic heavy processing latency.
 func handleHeavyWork(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	const N = 50000
 
 	// Sieve of Eratosthenes
@@ -169,6 +174,9 @@ func handleHeavyWork(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	duration := float64(time.Since(start).Nanoseconds()) / 1e6
+	w.Header().Set("X-Execution-Time-Ms", fmt.Sprintf("%.4f", duration))
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"worker_id":   workerID,
 		"task":        "heavy",
@@ -183,6 +191,7 @@ func handleHeavyWork(w http.ResponseWriter, r *http.Request) {
 // This establishes a distinct heavy computational signature from
 // the sieve task.
 func handleMatrixWork(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	const size = 500
 
 	// Initialize matrices with deterministic pseudo-random values
@@ -218,6 +227,9 @@ func handleMatrixWork(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < size; i++ {
 		trace += c[i][i]
 	}
+
+	duration := float64(time.Since(start).Nanoseconds()) / 1e6
+	w.Header().Set("X-Execution-Time-Ms", fmt.Sprintf("%.4f", duration))
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"worker_id": workerID,
