@@ -1299,11 +1299,12 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
         async function triggerLoad(type) {
             logToConsole('Dispatching loopback POST /work?type=' + type + ' to L7 gateway...');
+            var start = performance.now();
             try {
                 var res = await fetch(API_BASE + '/dashboard/trigger?type=' + type, { method: 'POST' });
                 var data = await res.json();
+                var elapsed = (performance.now() - start).toFixed(1);
                 if (res.ok) {
-                    var elapsed = data.elapsed_ms || 'N/A';
                     logToConsole('✅ Success! Routed to ' + data.worker_id + ' in ' + elapsed + 'ms.');
                     updateStatus();
                 } else {
