@@ -47,7 +47,7 @@ type Config struct {
 func loadConfig() Config {
 	cfg := Config{
 		TrafficLogPath: getEnv("TRAFFIC_LOG_PATH", "/data/traffic.csv"),
-		Port:           "8000",
+		Port:           getEnv("PORT", "8000"),
 	}
 
 	fastStr := getEnv("FAST_WORKER_URLS", "http://worker_1:8080,http://worker_2:8080")
@@ -722,7 +722,8 @@ func startHealthChecker(backends []*Backend, interval time.Duration) {
 				defer resp.Body.Close()
 				io.ReadAll(resp.Body)
 
-				if resp.StatusCode == http.StatusOK {
+				// Accept any response status code < 500 as a sign that the backend is up and reachable
+				if resp.StatusCode < 500 {
 					backend.MarkUp()
 				} else {
 					backend.MarkDown()
