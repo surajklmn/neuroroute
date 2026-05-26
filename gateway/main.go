@@ -168,8 +168,10 @@ type TrafficLogger struct {
 
 func NewTrafficLogger(path string) (*TrafficLogger, error) {
 	// Ensure parent directory exists
-	if dir := path[:strings.LastIndex(path, "/")]; dir != "" {
-		os.MkdirAll(dir, 0755)
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		if dir := path[:idx]; dir != "" {
+			os.MkdirAll(dir, 0755)
+		}
 	}
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
