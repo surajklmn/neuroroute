@@ -42,7 +42,7 @@ By utilizing an **embedded, inline-compiled Random Forest Classifier**, the gate
 
 ## 📊 Empirical Benchmarks
 
-Here is the absolute mathematical proof of our Layer 7 segregation strategy. When subjected to a concurrent **100 Virtual User (VU) stress test** containing mixed light, medium, and heavy traffic, standard Round-Robin load balancing collapses under resource contention, whereas **NeuroRoute isolates and protects all traffic classes** while delivering over **2× the throughput**.
+Here is the absolute mathematical proof of our Layer 7 segregation strategy. When subjected to a concurrent **100 Virtual User (VU) stress test** containing mixed light, medium, and heavy traffic, standard unsegregated load balancing (Least-Work) collapses under resource contention, whereas **NeuroRoute isolates and protects all traffic classes** while delivering over **2× the throughput**.
 
 > Benchmarks run on a fresh build: `make build → make up → make test-rr → make harvest → make train → make deploy-model → make test-smart → make compare`
 
@@ -51,7 +51,7 @@ Here is the absolute mathematical proof of our Layer 7 segregation strategy. Whe
 
 ### 📈 Overall System Metrics
 
-| Metric | Baseline (Round-Robin) | NeuroRoute (ML-Segregated) | Improvement |
+| Metric | Baseline (Unsegregated) | NeuroRoute (ML-Segregated) | Improvement |
 | :--- | :---: | :---: | :---: |
 | **Total Requests Served** | 3,946 | **8,488** | **+115% Throughput** |
 | **System Throughput** | ~32.9 RPS | **~70.7 RPS** | **+115%** |
