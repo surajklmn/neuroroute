@@ -80,7 +80,7 @@ test: ## Run k6 load test (requires k6 installed)
 test-rr: ## Load test with round-robin only
 	SMART_ROUTING=false docker compose up -d gateway
 	sleep 2
-	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/round_robin.csv loadtests/traffic_profile.js
+	K6_WEB_DASHBOARD=true k6 run --out csv=loadtests/results/unsegregated.csv loadtests/traffic_profile.js
 
 test-smart: ## Load test with smart routing
 	SMART_ROUTING=true docker compose up -d gateway

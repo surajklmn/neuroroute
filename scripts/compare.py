@@ -26,7 +26,7 @@ except ImportError:
     CHARTING_AVAILABLE = False
 
 # Paths
-RR_CSV = "loadtests/results/round_robin.csv"
+RR_CSV = "loadtests/results/unsegregated.csv"
 SMART_CSV = "loadtests/results/smart_route.csv"
 OUTPUT_CHART = "loadtests/results/comparison_chart.png"
 
@@ -47,12 +47,22 @@ def parse_k6_csv(filepath):
     # Ensure types
     df_reqs['metric_value'] = df_reqs['metric_value'].astype(float)
     
-    # Categorize requests into Light vs Heavy
-    # Light: GET /ping or POST /work?type=light
-    # Heavy: POST /work?type=heavy or POST /work?type=matrix
-    df_reqs['is_heavy'] = df_reqs['url'].fillna('').apply(
-        lambda x: any(term in str(x).lower() for term in ['heavy', 'matrix'])
-    )
+    # Categorize requests into 3 classes:
+    # Class 0 (Light): ping or type=light
+    # Class 1 (Medium): type=heavy
+    # Class 2 (Heavy): type=matrix
+    def get_class_label(url):
+        url_str = str(url).lower()
+        if 'ping' in url_str or 'type=light' in url_str:
+            return 0
+        elif 'type=heavy' in url_str:
+            return 1
+        elif 'type=matrix' in url_str:
+            return 2
+        else:
+            return 0
+            
+    df_reqs['class_label'] = df_reqs['url'].fillna('').apply(get_class_label)
     
     # Track errors (where status is not 200)
     df_reqs['is_error'] = df_reqs['status'].fillna(200).apply(lambda x: int(x) != 200)
@@ -69,12 +79,16 @@ def calculate_stats(df):
     # Overall
     stats['overall'] = compute_metrics(df)
     
-    # Light requests
-    df_light = df[~df['is_heavy']]
+    # Light requests (Class 0)
+    df_light = df[df['class_label'] == 0]
     stats['light'] = compute_metrics(df_light)
     
-    # Heavy requests
-    df_heavy = df[df['is_heavy']]
+    # Medium requests (Class 1)
+    df_medium = df[df['class_label'] == 1]
+    stats['medium'] = compute_metrics(df_medium)
+    
+    # Heavy requests (Class 2)
+    df_heavy = df[df['class_label'] == 2]
     stats['heavy'] = compute_metrics(df_heavy)
     
     return stats
@@ -104,8 +118,9 @@ def print_comparison_table(rr_stats, smart_stats):
     
     groups = [
         ("Overall System Traffic", "overall"),
-        ("Light Traffic (Insulated Fast Lane)", "light"),
-        ("Heavy Traffic (Quarantined Slow Lane)", "heavy")
+        ("Light Traffic (Insulated Fast Lane - Class 0)", "light"),
+        ("Medium Traffic (Isolated Medium Lane - Class 1)", "medium"),
+        ("Heavy Traffic (Quarantined Slow Lane - Class 2)", "heavy")
     ]
     
     for title, key in groups:
@@ -118,7 +133,7 @@ def print_comparison_table(rr_stats, smart_stats):
         error_diff = rr['error_rate'] - sm['error_rate']
         
         print(f"### 📊 {title}")
-        print("| Metric | Baseline (Round-Robin) | NeuroRoute (Predictive) | Delta / Change |")
+        print("| Metric | Baseline (Unsegregated) | NeuroRoute (Predictive) | Delta / Change |")
         print("| :--- | :---: | :---: | :---: |")
         print(f"| **Request Count** | {rr['count']} | {sm['count']} | {sm['count'] - rr['count']:+d} |")
         print(f"| **Error Rate** | {rr['error_rate']:.2f}% | {sm['error_rate']:.2f}% | {error_diff:+.2f}% |")
@@ -138,10 +153,12 @@ def generate_visualizations(rr_df, smart_df):
     print(f"🎨 Generating visualization chart → {OUTPUT_CHART}")
     
     # ── Prepare data slices ──
-    rr_light = rr_df[~rr_df['is_heavy']]['metric_value']
-    sm_light = smart_df[~smart_df['is_heavy']]['metric_value']
-    rr_heavy = rr_df[rr_df['is_heavy']]['metric_value']
-    sm_heavy = smart_df[smart_df['is_heavy']]['metric_value']
+    rr_light = rr_df[rr_df['class_label'] == 0]['metric_value']
+    sm_light = smart_df[smart_df['class_label'] == 0]['metric_value']
+    rr_medium = rr_df[rr_df['class_label'] == 1]['metric_value']
+    sm_medium = smart_df[smart_df['class_label'] == 1]['metric_value']
+    rr_heavy = rr_df[rr_df['class_label'] == 2]['metric_value']
+    sm_heavy = smart_df[smart_df['class_label'] == 2]['metric_value']
     
     # ── Color palette ──
     C_RR = '#f87171'       # Warm coral red
@@ -178,7 +195,7 @@ def generate_visualizations(rr_df, smart_df):
     bp = ax1.boxplot(
         box_data,
         patch_artist=True,
-        tick_labels=['Round-Robin\n(Unmanaged)', 'NeuroRoute\n(ML-Insulated)'],
+        tick_labels=['Unsegregated\n(Baseline)', 'NeuroRoute\n(ML-Insulated)'],
         widths=0.5,
         showfliers=True,
         flierprops=dict(marker='o', markersize=3, alpha=0.3),
@@ -219,24 +236,32 @@ def generate_visualizations(rr_df, smart_df):
     # ═══════════════════════════════════════════════════════════
     ax2 = axes[0, 1]
     
-    categories = ['Light\nAvg', 'Light\np95', 'Heavy\nAvg', 'Heavy\np95']
+    categories = [
+        'Light\nAvg', 'Light\np95',
+        'Medium\nAvg', 'Medium\np95',
+        'Heavy\nAvg', 'Heavy\np95'
+    ]
     rr_vals = [
-        np.mean(rr_light),
-        np.percentile(rr_light, 95),
+        np.mean(rr_light) if len(rr_light) > 0 else 0,
+        np.percentile(rr_light, 95) if len(rr_light) > 0 else 0,
+        np.mean(rr_medium) if len(rr_medium) > 0 else 0,
+        np.percentile(rr_medium, 95) if len(rr_medium) > 0 else 0,
         np.mean(rr_heavy) if len(rr_heavy) > 0 else 0,
         np.percentile(rr_heavy, 95) if len(rr_heavy) > 0 else 0,
     ]
     sm_vals = [
-        np.mean(sm_light),
-        np.percentile(sm_light, 95),
+        np.mean(sm_light) if len(sm_light) > 0 else 0,
+        np.percentile(sm_light, 95) if len(sm_light) > 0 else 0,
+        np.mean(sm_medium) if len(sm_medium) > 0 else 0,
+        np.percentile(sm_medium, 95) if len(sm_medium) > 0 else 0,
         np.mean(sm_heavy) if len(sm_heavy) > 0 else 0,
         np.percentile(sm_heavy, 95) if len(sm_heavy) > 0 else 0,
     ]
     
     x = np.arange(len(categories))
-    width = 0.32
+    width = 0.25
     
-    bars_rr = ax2.bar(x - width/2, rr_vals, width, label='Round-Robin', color=C_RR, alpha=0.85, edgecolor='white', linewidth=0.5)
+    bars_rr = ax2.bar(x - width/2, rr_vals, width, label='Unsegregated (Baseline)', color=C_RR, alpha=0.85, edgecolor='white', linewidth=0.5)
     bars_sm = ax2.bar(x + width/2, sm_vals, width, label='NeuroRoute', color=C_SM, alpha=0.85, edgecolor='white', linewidth=0.5)
     
     # Add value labels on bars
@@ -287,7 +312,7 @@ def generate_visualizations(rr_df, smart_df):
 
     x3 = np.arange(len(err_categories))
 
-    bars_rr3 = ax3.bar(x3 - width/2, rr_err_vals, width, label='Round-Robin', color=C_RR, alpha=0.85, edgecolor='white', linewidth=0.5)
+    bars_rr3 = ax3.bar(x3 - width/2, rr_err_vals, width, label='Unsegregated (Baseline)', color=C_RR, alpha=0.85, edgecolor='white', linewidth=0.5)
     bars_sm3 = ax3.bar(x3 + width/2, sm_err_vals, width, label='NeuroRoute', color=C_SM, alpha=0.85, edgecolor='white', linewidth=0.5)
 
     # Value labels

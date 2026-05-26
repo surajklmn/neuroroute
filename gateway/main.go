@@ -26,7 +26,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -262,15 +261,19 @@ func encodeMethod(method string) float64 {
 }
 
 func countJSONKeys(body []byte) float64 {
-	trimmed := strings.TrimSpace(string(body))
-	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+	start := 0
+	for start < len(body) && (body[start] == ' ' || body[start] == '\t' || body[start] == '\n' || body[start] == '\r') {
+		start++
+	}
+	if start >= len(body) || (body[start] != '{' && body[start] != '[') {
 		return 0
 	}
+
 	count := 0
 	inString := false
 	escaped := false
-	for i := 0; i < len(trimmed); i++ {
-		ch := trimmed[i]
+	for i := start; i < len(body); i++ {
+		ch := body[i]
 		if ch == '\\' && inString {
 			escaped = !escaped
 			continue
@@ -343,23 +346,23 @@ func (dm *DriftMonitor) triggerRetraining() {
 		dm.mu.Unlock()
 	}()
 
-	log.Println("🔄 Retraining triggered by Drift Detector: executing 'make harvest && make train && make build'...")
-	cmd := exec.Command("sh", "-c", "make harvest && make train && make build")
-	
-	// Dynamically locate the directory containing the Makefile
-	for _, dir := range []string{"/app", "/src", ".", "/home/zefrus/Projects/neuroroute"} {
-		if _, err := os.Stat(dir + "/Makefile"); err == nil {
-			cmd.Dir = dir
-			break
-		}
-	}
+	webhookURL := getEnv("RETRAIN_WEBHOOK_URL", "http://host.docker.internal:8050/retrain")
+	log.Printf("🔄 Retraining triggered by Drift Detector: sending POST request to webhook %s...", webhookURL)
 
-	out, err := cmd.CombinedOutput()
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(webhookURL, "application/json", bytes.NewBuffer([]byte(`{"trigger": "drift_detected", "source": "gateway"}`)))
 	if err != nil {
-		log.Printf("⚠️ Retraining command execution failed: %v. Output: %s", err, string(out))
+		log.Printf("[DRIFT_WARN] Webhook retraining call failed: %v. Offline retraining recommended.", err)
 		return
 	}
-	log.Printf("✅ Retraining succeeded! Output: %s", string(out))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		log.Printf("[DRIFT_WARN] Webhook returned status %s. Offline retraining recommended.", resp.Status)
+		return
+	}
+
+	log.Println("✅ Webhook retraining request successfully processed!")
 }
 
 // ── Router ──────────────────────────────────────────────────
@@ -569,7 +572,12 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Track in-flight weight atomically
 	target.InFlightWeight.Add(classWeight)
-	defer target.InFlightWeight.Add(-classWeight)
+	defer func() {
+		newWeight := target.InFlightWeight.Add(-classWeight)
+		if newWeight < 0 {
+			target.InFlightWeight.Store(0)
+		}
+	}()
 
 	// ── Custom response writer to capture worker ID and status ──
 	crw := &captureResponseWriter{ResponseWriter: w}
