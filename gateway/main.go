@@ -1309,10 +1309,10 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
                 simulationInterval = setInterval(function() {
                     var rand = Math.random();
                     var type = 'light';
-                    if (rand > 0.7 && rand <= 0.9) {
-                        type = 'medium';
-                    } else if (rand > 0.9) {
+                    if (rand > 0.5 && rand <= 0.7) {
                         type = 'heavy';
+                    } else if (rand > 0.7) {
+                        type = 'matrix';
                     }
                     triggerLoad(type);
                 }, 150);
