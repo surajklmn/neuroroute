@@ -1284,7 +1284,7 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
                         type = 'heavy';
                     }
                     triggerLoad(type);
-                }, 400);
+                }, 150);
             }
         }
 
@@ -1388,8 +1388,8 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
             }
         }
 
-        // Auto-update every 1 second
-        setInterval(updateStatus, 1000);
+        // Auto-update every 250 milliseconds
+        setInterval(updateStatus, 250);
         updateStatus(); // Initial call
     </script>
 </body>
