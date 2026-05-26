@@ -1205,6 +1205,18 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
                         <span>Trigger Heavy</span>
                     </button>
                 </div>
+                <div style="margin-top: 1.25rem; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 1rem;">
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); text-align: left;">
+                        <strong style="color: var(--neon-blue);">Continuous Load Simulator:</strong><br/>
+                        <span style="font-size: 0.75rem;">Spawns dynamic overlapping traffic (70% Light, 20% Medium, 10% Heavy) every 400ms to sustain queues.</span>
+                    </div>
+                    <button class="btn" id="btn-simulate" onclick="toggleSimulation()" style="flex-direction: row; padding: 0.6rem 1rem; font-size: 0.85rem; border-color: var(--neon-blue); box-shadow: 0 0 10px rgba(14, 165, 233, 0.1); width: auto; margin: 0;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="var(--neon-blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; margin-right: 0.4rem;" id="simulate-icon">
+                            <polygon points="5 3 19 12 5 21 5 3"/>
+                        </svg>
+                        <span id="simulate-text">Start Simulation</span>
+                    </button>
+                </div>
                 <div class="console-output" id="console">
                     <div>[SYSTEM] Ready for operations. Click a button to test load-balancing routing...</div>
                 </div>
@@ -1239,6 +1251,42 @@ func (rt *Router) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
     <script>
         var API_BASE = window.location.origin;
+        var simulationInterval = null;
+
+        function toggleSimulation() {
+            var btn = document.getElementById('btn-simulate');
+            var text = document.getElementById('simulate-text');
+            var icon = document.getElementById('simulate-icon');
+
+            if (simulationInterval) {
+                clearInterval(simulationInterval);
+                simulationInterval = null;
+                text.textContent = 'Start Simulation';
+                btn.style.borderColor = 'var(--neon-blue)';
+                btn.style.boxShadow = '0 0 10px rgba(14, 165, 233, 0.1)';
+                icon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
+                icon.setAttribute('stroke', 'var(--neon-blue)');
+                logToConsole('[SIMULATOR] Live traffic stream simulation paused.');
+            } else {
+                logToConsole('[SIMULATOR] Starting sustained concurrent traffic simulation stream...');
+                icon.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
+                icon.setAttribute('stroke', 'var(--neon-red)');
+                text.textContent = 'Pause Simulation';
+                btn.style.borderColor = 'var(--neon-red)';
+                btn.style.boxShadow = '0 0 15px rgba(239, 68, 68, 0.2)';
+
+                simulationInterval = setInterval(function() {
+                    var rand = Math.random();
+                    var type = 'light';
+                    if (rand > 0.7 && rand <= 0.9) {
+                        type = 'medium';
+                    } else if (rand > 0.9) {
+                        type = 'heavy';
+                    }
+                    triggerLoad(type);
+                }, 400);
+            }
+        }
 
         function logToConsole(text, isError) {
             var consoleBox = document.getElementById('console');
