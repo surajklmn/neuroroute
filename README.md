@@ -187,7 +187,19 @@ make compare
 
 ---
 
-## 📂 Project Structure
+## Diátaxis Developer Documentation Hub
+
+To help developers of all backgrounds understand, run, and extend NeuroRoute, we have written comprehensive, in-depth developer guides organized following the modern Diátaxis documentation blueprint:
+
+*   **[01: Gentle Introduction & Analogy Guide](docs/01_gentle_introduction.md)** — Start here! A high-level explanation of reverse proxies, Head-of-Line (HoL) blocking, and cgroups resource limits using simple traffic highway analogies.
+*   **[02: Machine Learning for Non-ML Devs](docs/02_ml_for_non_ml_devs.md)** — Demystifying feature vectors, Random Forests ensemble voting, and our zero-overhead Python-to-Go inline tree compiler.
+*   **[03: Go Gateway Systems Deep Dive](docs/03_gateway_deep_dive.md)** — An in-depth systems exploration of peek-and-restore body streaming, Weighted Least-Work routing calculations, and background retraining drift monitors.
+*   **[04: Adding Custom ML Features Tutorial](docs/04_how_to_custom_features.md)** — A step-by-step developer tutorial showing how to extract a new HTTP header feature, log telemetry, retrain the classifier, compile, and deploy.
+*   **[05: Architectural Reference Sheet](docs/05_architecture_reference.md)** — A search-optimized cheatsheet of all environment variables, cgroup bounds, CSV telemetry schemas, and gateway REST APIs.
+
+---
+
+## Project Structure
 
 ```
 ├── gateway/               # Go L7 Reverse Proxy Gateway (Embedded Predictor)
@@ -201,5 +213,5 @@ make compare
 
 ---
 
-## 📜 License
+## License
 MIT License.
