@@ -161,7 +161,10 @@ To manually test the L7 reverse-proxy's real-time routing decisions, execute the
     ```
     *   **Expected Headers**: Look for `X-Worker-ID: 4` or `5`, with CPU-heavy execution times exceeding $200\text{ms}$.
 
-### 4. Run Baseline & retrain
+### 4. Live Cloud & Real-World API Testing
+For an in-depth guide on executing live, real-world tests against public web endpoints (such as JSONPlaceholder and httpbin) using automatic host-rewriting, custom HTTP methods, and dynamic payload size routing, please read our dedicated [Real-Life L7 Testing Guide](REAL_LIFE_TESTING.md).
+
+### 5. Run Baseline & retrain
 Run the baseline stress tests, harvest accurate executions telemetry, train the Random Forest model and compile it inline into the gateway:
 ```bash
 make test-rr
@@ -169,14 +172,14 @@ make harvest
 make train
 ```
 
-### 5. Deploy and Verify Smart Routing
+### 6. Deploy and Verify Smart Routing
 Redeploy the gateway with the inline compiled model and launch the predictive stress tests:
 ```bash
 make deploy-model
 make test-smart
 ```
 
-### 6. Compare Performance Graphs
+### 7. Compare Performance Graphs
 Generate statistical comparisons and performance charts:
 ```bash
 make compare

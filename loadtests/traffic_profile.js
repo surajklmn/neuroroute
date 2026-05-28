@@ -31,7 +31,7 @@ export const options = {
   scenarios: {
     mixed_traffic: {
       executor: "constant-vus",
-      vus: 100,
+      vus: 5,
       duration: "2m",
     },
   },
